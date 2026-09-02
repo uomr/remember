@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="Remember">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#347a69"/>
+      <stop offset="1" stop-color="#2f6d5f"/>
+    </linearGradient>
+  </defs>
+  <!-- Full-bleed background so any mask shape stays on-brand. -->
+  <rect width="512" height="512" fill="url(#bg)"/>
+  <!-- Glyph scaled to ~64% and centered, keeping it inside the maskable safe zone. -->
+  <g transform="translate(256 256) scale(0.64) translate(-256 -256)">
+    <path d="M188 132h136a28 28 0 0 1 28 28v220a12 12 0 0 1-19 9.6L256 336l-77 53.6A12 12 0 0 1 160 380V160a28 28 0 0 1 28-28z"
+          fill="#faf9f7"/>
+    <circle cx="256" cy="226" r="34" fill="#2f6d5f"/>
+  </g>
+</svg>

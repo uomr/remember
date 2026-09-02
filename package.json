@@ -1,0 +1,41 @@
+{
+  "name": "remember",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Remember — privacy-first personal memory PWA. Save anything. Forget where you saved it. Find it when you need it.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "typecheck": "tsc --noEmit",
+    "icons": "node scripts/generate-icons.mjs",
+    "verify:backend": "node scripts/verify-backend.mjs",
+    "format": "prettier --write ."
+  },
+  "dependencies": {
+    "@supabase/ssr": "^0.5.2",
+    "@supabase/supabase-js": "^2.45.4",
+    "next": "^14.2.15",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.16.11",
+    "@types/react": "^18.3.11",
+    "@types/react-dom": "^18.3.0",
+    "autoprefixer": "^10.4.20",
+    "eslint": "^8.57.1",
+    "eslint-config-next": "^14.2.15",
+    "eslint-config-prettier": "^9.1.0",
+    "postcss": "^8.4.47",
+    "prettier": "^3.3.3",
+    "sharp": "^0.35.4",
+    "tailwindcss": "^3.4.13",
+    "typescript": "^5.6.3"
+  }
+}

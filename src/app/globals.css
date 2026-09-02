@@ -1,0 +1,172 @@
+/* Theme variables must be defined first so PostCSS never purges them */
+:root {
+  --bg: #faf9f7;
+  --surface-raised: #ffffff;
+  --surface-sunken: #f2f0ec;
+  --border: #e7e3dc;
+  --border-strong: #d6d1c7;
+  --ink: #1c1a17;
+  --ink-muted: #57534e;
+  --ink-faint: #8a857e;
+  --accent: #2f6d5f;
+  --accent-hover: #275a4f;
+  --accent-soft: #e6efec;
+
+  --font-sans: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Segoe UI Arabic', 'Noto Sans Arabic', 'Tajawal', sans-serif;
+  --font-display: Georgia, Cambria, 'Times New Roman', serif;
+}
+
+.dark, [data-theme="dark"] {
+  --bg: #17150f;
+  --surface-raised: #201d18;
+  --surface-sunken: #2a2620;
+  --border: #38332b;
+  --border-strong: #4a4439;
+  --ink: #f3efe7;
+  --ink-muted: #b3ac9f;
+  --ink-faint: #726b5e;
+  --accent: #3f9382;
+  --accent-hover: #4aa892;
+  --accent-soft: #1c2b26;
+}
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+    color-scheme: light dark;
+  }
+
+  body {
+    background-color: var(--bg);
+    color: var(--ink);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    transition: background-color 150ms ease-out, color 150ms ease-out;
+  }
+
+  :focus-visible {
+    outline: none;
+  }
+}
+
+/* Explicit class-based dark overrides as guaranteed fallback */
+.dark body, [data-theme="dark"] body {
+  background-color: #17150f !important;
+  color: #f3efe7 !important;
+}
+
+.dark .bg-surface, [data-theme="dark"] .bg-surface {
+  background-color: #17150f !important;
+}
+
+.dark .bg-surface-raised, [data-theme="dark"] .bg-surface-raised {
+  background-color: #201d18 !important;
+}
+
+.dark .bg-surface-sunken, [data-theme="dark"] .bg-surface-sunken {
+  background-color: #2a2620 !important;
+}
+
+.dark .text-ink, [data-theme="dark"] .text-ink {
+  color: #f3efe7 !important;
+}
+
+.dark .text-ink-muted, [data-theme="dark"] .text-ink-muted {
+  color: #b3ac9f !important;
+}
+
+.dark .text-ink-faint, [data-theme="dark"] .text-ink-faint {
+  color: #726b5e !important;
+}
+
+.dark .border-border, [data-theme="dark"] .border-border {
+  border-color: #38332b !important;
+}
+
+.dark .border-border-strong, [data-theme="dark"] .border-border-strong {
+  border-color: #4a4439 !important;
+}
+
+.dark .text-accent, [data-theme="dark"] .text-accent {
+  color: #3f9382 !important;
+}
+
+.dark .bg-accent, [data-theme="dark"] .bg-accent {
+  background-color: #3f9382 !important;
+}
+
+.dark .bg-accent-soft, [data-theme="dark"] .bg-accent-soft {
+  background-color: #1c2b26 !important;
+}
+
+@layer utilities {
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+  .no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+}
+
+/* Brand Display Typography */
+.font-brand-title {
+  font-family: var(--font-display);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.font-brand-logo {
+  font-family: var(--font-display);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+/* Lightweight smooth gradient for sign-in */
+.signin-mesh-bg {
+  background:
+    radial-gradient(circle at 20% 20%, #e6efec 0%, transparent 45%),
+    radial-gradient(circle at 80% 70%, #f2f0ec 0%, transparent 50%),
+    #faf9f7;
+}
+
+.dark .signin-mesh-bg, [data-theme="dark"] .signin-mesh-bg {
+  background:
+    radial-gradient(circle at 20% 20%, #1c2b26 0%, transparent 45%),
+    radial-gradient(circle at 80% 70%, #2a2620 0%, transparent 50%),
+    #17150f !important;
+}
+
+/* Orchestrated Page Rise-In Animation (lightweight & hardware-accelerated) */
+@keyframes rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-rise-in {
+  animation: rise-in 300ms cubic-bezier(0.16, 1, 0.3, 1) both;
+  will-change: transform, opacity;
+}
+
+/* Reduced motion preference */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
