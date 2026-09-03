@@ -79,8 +79,11 @@ export function normalizeUrl(raw: string): string | null {
   }
 }
 
-/** Strip path separators so a user file name can't escape its storage folder. */
+/** Strip path separators so a user file name can't escape its storage folder.
+ *  Uses `\p{L}\p{N}` (Unicode letters + digits) instead of `\w` so Arabic,
+ *  CJK and accented characters are preserved rather than replaced with `_`. */
 export function safeFileName(name: string): string {
-  const base = name.split(/[\\/]/).pop() ?? 'file';
-  return base.replace(/[^\w.\- ]+/g, '_').slice(0, 200) || 'file';
+  const base = name.split(/[\\\/]/).pop() ?? 'file';
+  // The `u` flag enables Unicode property escapes (\p{L} = any letter, \p{N} = any digit).
+  return base.replace(/[^\p{L}\p{N}.\- ]+/gu, '_').slice(0, 200) || 'file';
 }

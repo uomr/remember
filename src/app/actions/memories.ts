@@ -187,7 +187,7 @@ export async function deleteMemory(memoryId: string): Promise<ActionResult> {
     if (paths.length > 0) {
       const { error: storageError } = await supabase.storage.from(STORAGE_BUCKET).remove(paths);
       if (storageError) {
-        console.warn('[Storage Cleanup Warning] Failed to remove storage paths for deleted memory:', memoryId, storageError);
+        console.error('[delete] Storage cleanup failed for memory:', memoryId, storageError);
       }
     }
 

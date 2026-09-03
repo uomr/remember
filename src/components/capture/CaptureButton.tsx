@@ -4,7 +4,7 @@ import { useEffect, useRef, useState, useTransition, type FormEvent } from 'reac
 import { createPortal } from 'react-dom';
 import { useRouter } from 'next/navigation';
 import { createMemory } from '@/app/actions/memories';
-import { enrichImageMemory, enrichGenericMemory } from '@/app/actions/enrich';
+import { enrichImageMemory, enrichGenericMemory, enrichDocumentMemory } from '@/app/actions/enrich';
 import { Button } from '@/components/ui/Button';
 import { TextField } from '@/components/ui/TextField';
 import { useToast } from '@/components/ui/Toast';
@@ -195,6 +195,10 @@ export function CaptureButton() {
           const id = result.memoryId;
           if (savingKind === 'image') {
             void enrichImageMemory(id).then(() => router.refresh());
+          } else if (savingKind === 'document') {
+            // enrichDocumentMemory: deterministic text extraction (no AI)
+            // + optional embedding. Never blocks capture.
+            void enrichDocumentMemory(id).then(() => router.refresh());
           } else {
             void enrichGenericMemory(id).then(() => router.refresh());
           }

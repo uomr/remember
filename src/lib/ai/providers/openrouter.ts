@@ -5,6 +5,7 @@ import type {
   AIService,
   Embedding,
   ExtractedText,
+  ImageAnalysis,
   ImageDescription,
   OcrResult,
   SearchCandidate,
@@ -82,8 +83,30 @@ async function chat(content: ChatMessageContent[], signal: AbortSignal): Promise
 }
 
 /**
- * Ask a vision model about an image. Fetches the bytes and the completion under
- * one shared timeout so a slow step can never hang the request.
+ * Ask a vision model about an already-fetched base64 data URL.
+ * This is the core vision call — it does NOT re-fetch the image.
+ * Callers that need to make multiple passes over the same image
+ * should fetch the image ONCE and call this directly to avoid
+ * duplicated bandwidth and signed-URL expiry risk (fixes G2).
+ */
+async function askAboutImageData(
+  dataUrl: string,
+  prompt: string,
+  signal: AbortSignal,
+): Promise<string> {
+  return chat(
+    [
+      { type: 'text', text: prompt },
+      { type: 'image_url', image_url: { url: dataUrl } },
+    ],
+    signal,
+  );
+}
+
+/**
+ * Ask a vision model about an image URL. Fetches the bytes once and calls
+ * the completion under one shared timeout so a slow step never hangs.
+ * Prefer `askAboutImageData` directly when multiple prompts share the same image.
  */
 async function askAboutImage(fileUrl: string, prompt: string): Promise<string> {
   if (!apiKey) throw new Error('OpenRouter API key is not configured.');
@@ -92,13 +115,7 @@ async function askAboutImage(fileUrl: string, prompt: string): Promise<string> {
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const dataUrl = await toDataUrl(fileUrl, controller.signal);
-    return await chat(
-      [
-        { type: 'text', text: prompt },
-        { type: 'image_url', image_url: { url: dataUrl } },
-      ],
-      controller.signal,
-    );
+    return await askAboutImageData(dataUrl, prompt, controller.signal);
   } finally {
     clearTimeout(timer);
   }
@@ -122,6 +139,11 @@ const DESCRIBE_PROMPT =
 export const openRouterProvider: AIService = {
   enabled: true,
 
+  /**
+   * OCR pass. Kept as a standalone method for callers that only need text extraction.
+   * When both OCR and description are needed for the same image, use enrichImageMemory
+   * which fetches the image once and calls both passes via askAboutImageData.
+   */
   async ocr({ fileUrl }): Promise<OcrResult> {
     const text = await askAboutImage(fileUrl, OCR_PROMPT);
     return { text };
@@ -130,6 +152,30 @@ export const openRouterProvider: AIService = {
   async describeImage({ fileUrl }): Promise<ImageDescription> {
     const description = await askAboutImage(fileUrl, DESCRIBE_PROMPT);
     return { description };
+  },
+
+  /**
+   * Fetch the image exactly ONCE and run both OCR and describe passes in parallel.
+   * This halves bandwidth and eliminates the race condition where the signed URL
+   * expires between the two sequential calls (fixes G2 / P4 from audit).
+   */
+  async ocrAndDescribeImage({ fileUrl }): Promise<ImageAnalysis> {
+    if (!apiKey) throw new Error('OpenRouter API key is not configured.');
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs * 2); // two model calls share one budget
+    try {
+      const dataUrl = await toDataUrl(fileUrl, controller.signal);
+      const [descResult, ocrResult] = await Promise.allSettled([
+        askAboutImageData(dataUrl, DESCRIBE_PROMPT, controller.signal),
+        askAboutImageData(dataUrl, OCR_PROMPT, controller.signal),
+      ]);
+      return {
+        description: descResult.status === 'fulfilled' ? descResult.value.trim() : '',
+        ocrText: ocrResult.status === 'fulfilled' ? ocrResult.value.trim() : '',
+      };
+    } finally {
+      clearTimeout(timer);
+    }
   },
 
   /**
@@ -220,7 +266,31 @@ export const openRouterProvider: AIService = {
         `USER QUERY: ${query}`,
         `CANDIDATES: ${JSON.stringify(compact)}`,
       ].join('\n');
-      const raw = await chat([{ type: 'text', text: prompt }], controller.signal);
+
+      // temperature:0 for deterministic ranking; response_format enforces JSON output
+      // on models that support it (OpenRouter passes it through transparently).
+      const res = await fetch(`${baseUrl}/chat/completions`, {
+        method: 'POST',
+        signal: controller.signal,
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+          'HTTP-Referer': referer,
+          'X-Title': title,
+        },
+        body: JSON.stringify({
+          model,
+          temperature: 0,
+          messages: [{ role: 'user', content: prompt }],
+        }),
+      });
+      if (!res.ok) {
+        const detail = await res.text().catch(() => '');
+        throw new Error(`OpenRouter reranker failed (${res.status}): ${detail.slice(0, 300)}`);
+      }
+      const json = (await res.json()) as { choices?: { message?: { content?: string } }[] };
+      const raw = json.choices?.[0]?.message?.content?.trim() ?? '';
+      if (!raw) throw new Error('OpenRouter reranker returned empty response.');
       const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
       const parsed = JSON.parse(cleaned) as { ids?: unknown };
       if (!Array.isArray(parsed.ids)) throw new Error('Search reranker returned invalid JSON.');

@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { createMemory } from '@/app/actions/memories';
-import { enrichImageMemory, enrichGenericMemory } from '@/app/actions/enrich';
+import { enrichImageMemory, enrichGenericMemory, enrichDocumentMemory } from '@/app/actions/enrich';
 import { normalizeUrl } from '@/lib/memories/validation';
 import { UPLOAD_LIMITS } from '@/lib/config';
 
@@ -66,10 +66,13 @@ export async function POST(request: NextRequest) {
     return NextResponse.redirect(`${origin}/?shared=error`, { status: 303 });
   }
 
-  // Non-blocking enrichment in background
+  // Non-blocking enrichment in background — never awaited so capture is instant.
   if (result.memoryId) {
     if (file && isImage) {
       void enrichImageMemory(result.memoryId);
+    } else if (file && !isImage) {
+      // Document: deterministic text extraction (no AI required for extraction).
+      void enrichDocumentMemory(result.memoryId);
     } else {
       void enrichGenericMemory(result.memoryId);
     }

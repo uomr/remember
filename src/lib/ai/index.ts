@@ -30,6 +30,9 @@ const disabledProvider: AIService = {
   describeImage() {
     return Promise.reject(new AIDisabledError('describeImage'));
   },
+  ocrAndDescribeImage() {
+    return Promise.reject(new AIDisabledError('ocrAndDescribeImage'));
+  },
   extractText() {
     return Promise.reject(new AIDisabledError('extractText'));
   },

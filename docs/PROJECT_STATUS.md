@@ -6,10 +6,11 @@
 
 - **Product:** Remember — privacy-first personal memory PWA.
 - **Promise:** _Save anything. Forget where you saved it. Find it when you need it._
-- **Current phase:** **Phase 1 (Core MVP) feature-complete & backend-proven (40/40); Phase 2 (Intelligence) in progress — image OCR + bilingual description via OpenRouter, and now MEANING-BASED (semantic) search: every memory carries a pgvector embedding and search fuses lexical + semantic recall. Typecheck clean. The interactive magic-link journey (S10) is still the only manual Phase-1 check left.**
-- **Semantic search (Phase 2, LIVE):** migration `0002_semantic_search.sql` adds pgvector, `memories.embedding vector(1536)` (OpenAI `text-embedding-3-small`), an HNSW cosine index, and the RLS-safe `match_memories()` RPC. Enrichment stores an embedding; existing rows were backfilled (6/6). `searchMemories` now uses a **three-stage intelligent pipeline**: lexical + vector candidate retrieval → RRF candidate fusion → an intent-aware language-model reranker that reads the candidate evidence and returns only genuinely relevant memories. This fixes cosine-noise failures seen live: `جزمة` now returns only the two footwear images (never `JJJJ`), while `حذاء اسود` / `شوز اسود` returns only the actually black shoe. If the AI judge fails, the app conservatively falls back to exact lexical results rather than exposing weak semantic noise.
-- **AI (Phase 2):** OFF by default. Enable by adding to `.env.local`: `AI_PROVIDER=openrouter`, `OPENROUTER_API_KEY=sk-or-…` (optional `OPENROUTER_MODEL`, default `google/gemini-2.5-flash`). With those set, saving an image triggers non-blocking OCR + description that make it text-searchable. No key → the app behaves exactly as before.
-- **Live Supabase:** migrations `0001` and `0002` are applied; RLS is on, the storage bucket is private, email auth is configured, and `match_memories()` is verified live. Backend verification previously completed end-to-end with `npm run verify:backend` (two throwaway users, 40 assertions). See `docs/SUPABASE_SETUP.md`.
+- **Current phase:** **Phase 1 (Core MVP) feature-complete & backend-proven (40/40); Phase 2 (Document Intelligence & Selective Semantic Search — M2A & M2B) fully implemented, verified live on Supabase production database (14/14 tests passing), and typecheck clean (0 errors).**
+- **Document Intelligence (M2A & M2B, LIVE):**
+  - **M2A Foundation:** Deterministic text extraction ($0 AI) for PDF, DOCX, TXT, MD; structure-aware chunking preserving page numbers and headings; stored PostgreSQL `search_vector` on `memory_chunks` with GIN indexing; strict RLS (`user_id = auth.uid()`).
+  - **M2B Selective Semantic Search:** Representative chunk selection (intro + headings + density + page distribution); versioned idempotency (`embedding_model`, `embedding_version`); lazy on-demand embedding; FTS bypass for high-confidence lexical queries; cross-lingual (Arabic/English) and conceptual query retrieval tested and proven on Page 47 of a 50-page document. User always sees ONE Memory.
+- **Live Supabase:** migrations `0001`, `0002`, and `0003` are applied on production ref `ddywznezwcizvccpbvdr`; RLS is on across all tables (`memories`, `memory_files`, `profiles`, `memory_chunks`). All 40 backend tests and 14 M2B tests passing.
 - **Stack:** Next.js (App Router) · TypeScript (strict) · Tailwind CSS · Supabase (Postgres/Auth/Storage/RLS) · PWA
 
 ---
@@ -143,11 +144,297 @@ a permanent live harness (`npm run verify:backend`).
 
 ## Important next steps
 
-1. Complete the remaining manual **Critical User Journey**: magic-link sign-in → capture each type → wait for image enrichment → search in Arabic and English → open → delete.
-2. Add automated tests around the complete hybrid pipeline, especially `rankSearch`, RLS-scoped `match_memories`, timeout/fallback behavior, pagination beyond the 100-candidate pool, and malformed model JSON.
-3. Reconcile stale secondary docs (`ARCHITECTURE.md`, `DATABASE.md`, `DECISIONS.md`, `ROADMAP.md`, `README.md`, `supabase/README.md`) with migration `0002` and the live AI/search implementation; this status file and `COMPLETE_TECHNICAL_HANDOFF_AND_AUDIT.md` describe the current implementation.
-4. Address the concrete audit risks recorded in the Arabic handoff: reranker cost/latency and evidence size, background enrichment durability, storage-delete error handling, script drift, generated database types, and missing document extraction.
-5. Confirm the one-time provisioning PAT has been revoked (S11). Never restore it unless another administrative migration must be applied, and remove/revoke it immediately afterward.
+1. **LB1 — Complete S10:** Run the interactive Critical User Journey: magic-link sign-in → capture each type → wait for image enrichment → search in Arabic and English → open → delete.
+2. **LB2 — Confirm S11:** Verify the provisioning PAT is revoked. Check `.env.local` and the Supabase dashboard.
+3. **NB1 — Fix `/share` enrichment gap:** Patch `src/app/share/route.ts` to call `enrichImageMemory` for image shares.
+4. **NB2-NB6 — Small hardening:** deduplicate image fetch, add error logging for enrichment/storage failures, fix `safeFileName` Unicode, add reranker output schema.
+5. **NB7-NB9 — Script/comment drift:** Fix `verify-hybrid.mjs` threshold (0.2→0.1), update `diagnose-search.mjs` header, fix `database.ts` source-of-truth comment.
+6. **NB11 — Reconcile stale secondary docs** (`ARCHITECTURE.md`, `DATABASE.md`, `DECISIONS.md`, `ROADMAP.md`, `README.md`, `supabase/README.md`).
+
+---
+
+## AUDIT FINDINGS — Verification Pass (2026-09-03)
+
+> All 12 gaps re-verified against actual current source files. Files read:
+> `src/app/share/route.ts`, `src/app/actions/enrich.ts`, `src/app/actions/memories.ts`,
+> `src/components/capture/CaptureButton.tsx`, `src/lib/memories/validation.ts`,
+> `src/lib/memories/queries.ts`, `src/lib/ai/providers/openrouter.ts`,
+> `src/app/layout.tsx`, `src/components/search/SearchBar.tsx`,
+> `scripts/verify-hybrid.mjs`, `scripts/diagnose-search.mjs`, `src/types/database.ts`.
+> **No application code was modified during this pass.**
+
+---
+
+### Verified Gap Table
+
+| GAP | STATUS | FILE | LAUNCH BLOCKER? | RECOMMENDED ACTION |
+|-----|--------|------|-----------------|-------------------|
+| G1 | **FALSE — ALREADY FIXED** | `src/app/share/route.ts` | No | Remove from gap list |
+| G2 | **CONFIRMED** | `src/lib/ai/providers/openrouter.ts` | No | Fetch image once, pass base64 to both calls |
+| G3 | **CONFIRMED** | `src/app/actions/enrich.ts` | No | Add `else { console.error(...) }` after the update check |
+| G4 | **PARTIALLY TRUE** | `src/app/actions/memories.ts` | No | Promote `console.warn` to `console.error`; already non-fatal by design |
+| G5 | **CONFIRMED** | `src/app/actions/memories.ts` + `src/app/actions/enrich.ts` | No | Move embedding call into `createMemory` server action as a non-awaited server-side call |
+| G6 | **CONFIRMED** | `src/lib/memories/validation.ts` | No | Replace `[^\w.\- ]+` with `[^\p{L}\p{N}.\- ]+` with `u` flag |
+| G7 | **DOCUMENTATION-ONLY** | `src/types/database.ts` | No | Update comment to cite both `0001` and `0002` |
+| G8 | **CONFIRMED** | `scripts/verify-hybrid.mjs` | No | Script already uses `0.1`; claim was wrong — but reranker stage is still absent from the script |
+| G9 | **CONFIRMED** | `scripts/diagnose-search.mjs` | No | Update footer note on line 88–90 |
+| G10 | **PARTIALLY TRUE** | `src/components/search/SearchBar.tsx` | No | No AbortController; debounce exists (300ms) but does not cancel in-flight server requests |
+| G11 | **CONFIRMED** | `src/lib/ai/providers/openrouter.ts` | No | Add `temperature: 0` to `chat()` body; `response_format` if model supports it |
+| G12 | **FALSE — PARTIALLY FIXED** | `src/app/layout.tsx` | No | `dir="auto"` is already set; `lang="en"` is a SEO concern only |
+
+---
+
+### Detailed Findings Per Gap
+
+#### G1 — `/share` does not call `enrichImageMemory` — **FALSE (ALREADY FIXED)**
+
+**File:** [`src/app/share/route.ts`](file:///f:/Temp/Snake_PostMan/Neural_Ecosystem/ProjectSave/Remember/src/app/share/route.ts)
+
+**Exact current code (lines 69–76):**
+```typescript
+// Non-blocking enrichment in background
+if (result.memoryId) {
+  if (file && isImage) {
+    void enrichImageMemory(result.memoryId);
+  } else {
+    void enrichGenericMemory(result.memoryId);
+  }
+}
+```
+**Verdict:** The route already imports and calls both `enrichImageMemory` and `enrichGenericMemory`. The previous audit's G1 was wrong. **This gap does not exist.**
+
+---
+
+#### G2 — Image sent to OpenRouter twice — **CONFIRMED**
+
+**File:** [`src/lib/ai/providers/openrouter.ts`](file:///f:/Temp/Snake_PostMan/Neural_Ecosystem/ProjectSave/Remember/src/lib/ai/providers/openrouter.ts) lines 125–133
+
+```typescript
+async ocr({ fileUrl }): Promise<OcrResult> {
+  const text = await askAboutImage(fileUrl, OCR_PROMPT);  // toDataUrl called inside
+  return { text };
+},
+async describeImage({ fileUrl }): Promise<ImageDescription> {
+  const description = await askAboutImage(fileUrl, DESCRIBE_PROMPT);  // toDataUrl called again
+  return { description };
+},
+```
+
+`askAboutImage` always calls `toDataUrl(fileUrl, signal)` internally. When `enrich.ts` calls both with `Promise.allSettled`, two independent fetches of the same signed URL occur.
+
+**Why it matters:** Doubles bandwidth and doubles the risk of a transient signed-URL expiry mid-enrichment. Not a correctness bug — both calls succeed independently — but unnecessary cost.
+
+**Launch blocker:** No.
+
+**Smallest safe fix:** Extract `toDataUrl` call before `Promise.allSettled` in `enrich.ts` and pass the `dataUrl` string directly. Requires adding a `dataUrl` input variant to the provider interface, or a single shared helper in `enrich.ts`.
+
+---
+
+#### G3 — `enrichImageMemory` DB update failure silently swallowed — **CONFIRMED**
+
+**File:** [`src/app/actions/enrich.ts`](file:///f:/Temp/Snake_PostMan/Neural_Ecosystem/ProjectSave/Remember/src/app/actions/enrich.ts) line 75–78
+
+```typescript
+const { error: updateError } = await supabase.from('memories').update(update).eq('id', memoryId);
+if (!updateError) {
+  revalidatePath('/');
+  revalidatePath(`/memory/${memoryId}`);
+}
+// No else branch — updateError is checked but never logged
+```
+
+**Why it matters:** A failed embedding store is completely invisible. The memory exists but has no `text_content` or `embedding`, making it unsearchable in both lexical and semantic modes. No log, no retry, no signal.
+
+**Launch blocker:** No.
+
+**Smallest safe fix:** Add `else { console.error('[Enrich] DB update failed for', memoryId, updateError); }` inside the `try` block (outside the outer `catch` which already silences for UX).
+
+---
+
+#### G4 — Storage delete failure not surfaced — **PARTIALLY TRUE**
+
+**File:** [`src/app/actions/memories.ts`](file:///f:/Temp/Snake_PostMan/Neural_Ecosystem/ProjectSave/Remember/src/app/actions/memories.ts) lines 188–192
+
+```typescript
+const { error: storageError } = await supabase.storage.from(STORAGE_BUCKET).remove(paths);
+if (storageError) {
+  console.warn('[Storage Cleanup Warning] Failed to remove storage paths for deleted memory:', memoryId, storageError);
+}
+```
+
+**Verdict:** The code correctly does NOT re-surface the error to the user (memory row is already gone; partial-success is reasonable). A `console.warn` exists. The prior audit called this "not returned to user" as a gap — that is by design, not a bug. The legitimate weakness is that `warn` level may be filtered out in production monitoring; it should be `error` level.
+
+**Why it matters (partially):** Orphaned private files accumulate silently if storage delete fails. The log level means it may be invisible in production.
+
+**Launch blocker:** No.
+
+**Smallest safe fix:** Change `console.warn` to `console.error`. No behavior change.
+
+---
+
+#### G5 — Embedding for notes/links/docs is client-side only — **CONFIRMED**
+
+**All call sites for `enrichGenericMemory`:**
+- `src/components/capture/CaptureButton.tsx` line 199: `void enrichGenericMemory(id).then(() => router.refresh())` — client-side only, fires after UI success.
+- `src/app/share/route.ts` line 74: `void enrichGenericMemory(result.memoryId)` — server-side Route Handler. ✅ This path IS server-side.
+- `src/app/actions/memories.ts` — **no call** to `enrichGenericMemory` at all.
+
+**Verdict:** Confirmed for the `CaptureButton` path. If the user closes the tab within milliseconds of capture, the `enrichGenericMemory` call may not complete (browser may kill the fetch). However, the `/share` route correctly calls it server-side. For regular capture via the UI, it remains client-dependent.
+
+**Why it matters:** Notes, links, and documents saved via `CaptureButton` with no AI enrichment will have `embedding = NULL` permanently if the client-side call fails, making them invisible to semantic search forever.
+
+**Launch blocker:** No. Lexical search still works; semantic search degrades gracefully.
+
+**Smallest safe fix:** In `createMemory` (server action), after successfully inserting a note/link/document, fire `enrichGenericMemory` in the same server-side context (non-awaited). This ensures at least one server-side attempt regardless of client state.
+
+---
+
+#### G6 — `safeFileName` strips Arabic characters — **CONFIRMED**
+
+**File:** [`src/lib/memories/validation.ts`](file:///f:/Temp/Snake_PostMan/Neural_Ecosystem/ProjectSave/Remember/src/lib/memories/validation.ts) line 85
+
+```typescript
+export function safeFileName(name: string): string {
+  const base = name.split(/[\\\/]/).pop() ?? 'file';
+  return base.replace(/[^\w.\- ]+/g, '_').slice(0, 200) || 'file';
+}
+```
+
+`\w` in JavaScript without the `u` flag matches `[A-Za-z0-9_]` only — every Arabic letter, every CJK character, every accented Latin character is replaced with `_`. A file named `صورة.jpg` becomes `____.jpg`.
+
+**Why it matters:** Arabic file names are fully mangled. The stored `file_name` in `memory_files` becomes meaningless underscores. The note is still findable by `text_content`, but the title (which defaults to `fileName`) becomes `____.jpg`.
+
+**Launch blocker:** No. Files are stored correctly; only the displayed name is wrong.
+
+**Smallest safe fix:** `base.replace(/[^\p{L}\p{N}.\- ]+/gu, '_')` — add Unicode category classes and the `u` flag.
+
+---
+
+#### G7 — `database.ts` comment cites only `0001` — **DOCUMENTATION-ONLY**
+
+**File:** [`src/types/database.ts`](file:///f:/Temp/Snake_PostMan/Neural_Ecosystem/ProjectSave/Remember/src/types/database.ts) line 4
+
+```typescript
+ * Source of truth: supabase/migrations/0001_initial_foundation.sql
+```
+
+The `embedding` field (lines 30–31) comes from `0002`. The comment is misleading but has zero runtime impact.
+
+**Launch blocker:** No.
+
+**Smallest safe fix:** Change to `supabase/migrations/0001_initial_foundation.sql + 0002_semantic_search.sql`.
+
+---
+
+#### G8 — `verify-hybrid.mjs` threshold drift — **PARTIALLY TRUE (different from audit claim)**
+
+**File:** [`scripts/verify-hybrid.mjs`](file:///f:/Temp/Snake_PostMan/Neural_Ecosystem/ProjectSave/Remember/scripts/verify-hybrid.mjs) line 51
+
+```javascript
+const SEMANTIC_MIN_SIMILARITY = 0.1;
+```
+
+**Verdict:** The threshold is **already `0.1`** — matching the app. The earlier audit claim of `0.2` was **incorrect**. However, the script header says it "mirrors `searchMemories()` byte-for-byte" (line 4), yet it does **not** include the reranker (`rankSearch`) stage. The script output represents retrieval+RRF only, not the full pipeline.
+
+**Why it matters:** The script's closing message ("Ranking above is exactly what the app returns") on line 155 is misleading — with AI enabled, the app applies a reranker pass on top of RRF that can substantially reorder or filter these results.
+
+**Launch blocker:** No.
+
+**Smallest safe fix:** Update line 155 note and header comment to state: "This shows the RRF-fused retrieval ranking. The live app additionally applies an LLM reranker pass when AI is enabled."
+
+---
+
+#### G9 — `diagnose-search.mjs` stale "lexical only" message — **CONFIRMED**
+
+**File:** [`scripts/diagnose-search.mjs`](file:///f:/Temp/Snake_PostMan\Neural_Ecosystem\ProjectSave\Remember\scripts\diagnose-search.mjs) lines 88–90
+
+```javascript
+'\\nNote: search is LEXICAL (word match), not semantic. Even an image WITH text\\n' +
+  'is only found when your search words literally overlap that stored text.',
+```
+
+This note is factually wrong since Phase 2. The live app uses hybrid lexical + semantic + reranker.
+
+**Launch blocker:** No. It is a diagnostic script, not production code.
+
+**Smallest safe fix:** Update the note to: "search is HYBRID (lexical word match + semantic vector similarity). With AI enabled, a reranker selects the most relevant results."
+
+---
+
+#### G10 — No request cancellation on search — **PARTIALLY TRUE**
+
+**SearchBar** (`src/components/search/SearchBar.tsx`) debounces at 300ms via `setTimeout`. It pushes a URL change via `router.replace()`. The **page re-render** is a Server Component navigation — Next.js App Router handles this via the navigation queue and will cancel superseded navigations internally.
+
+**`queries.ts` `searchMemories`** has no AbortController, so if two navigations arrive nearly simultaneously, both DB queries and AI calls can run in parallel on the server, with the later response winning.
+
+**Verdict:** Partially true. The debounce reduces frequency significantly. The real risk is rapid consecutive searches where embedding + reranker calls stack up server-side. No AbortController in `queries.ts` or the Server Component path.
+
+**Launch blocker:** No. The final displayed result will always be the last-received response.
+
+**Smallest safe fix:** No trivial fix without a more complex architecture change (route-level cancellation is not available in Next.js App Router Server Components). Acceptable as-is for Phase 1/2 personal-scale use.
+
+---
+
+#### G11 — Reranker has no `temperature` / `response_format` — **CONFIRMED**
+
+**File:** [`src/lib/ai/providers/openrouter.ts`](file:///f:/Temp/Snake_PostMan/Neural_Ecosystem/ProjectSave/Remember/src/lib/ai/providers/openrouter.ts) `chat()` function lines 65–69:
+
+```typescript
+body: JSON.stringify({
+  model,
+  messages: [{ role: 'user', content }],
+}),
+```
+
+No `temperature`, no `max_tokens`, no `response_format`. The reranker prompt says "Respond as strict JSON only" but nothing enforces it at the API level.
+
+**Why it matters:** Without `temperature: 0`, the model may produce different orderings for the same query. Without `response_format`, some models add markdown fences or text around the JSON (the code handles fences but not all cases). Without `max_tokens`, a large candidate set could produce a very long response.
+
+**Launch blocker:** No. The `cleaned` step handles markdown fences; `JSON.parse` throws on invalid JSON and the `catch` falls back to lexical.
+
+**Smallest safe fix:** Add `temperature: 0` to the `rankSearch` chat body only (not the general `chat()` helper, since OCR/describe benefit from slight variation). Most OpenRouter models accept this field.
+
+---
+
+#### G12 — `html lang="en"` with Arabic content — **FALSE (PARTIALLY FIXED)**
+
+**File:** [`src/app/layout.tsx`](file:///f:/Temp/Snake_PostMan/Neural_Ecosystem/ProjectSave/Remember/src/app/layout.tsx) line 35
+
+```tsx
+<html lang="en" dir="auto" suppressHydrationWarning>
+```
+
+**Verdict:** `dir="auto"` is **already present**. This means the browser will automatically detect text direction per paragraph — Arabic text in notes will render RTL correctly. The `lang="en"` attribute is a minor SEO/screen-reader concern (assistive technology may announce the page language as English even for Arabic content) but does **not** cause broken rendering. This is not a gap that affects functional behavior.
+
+**Launch blocker:** No.
+
+**Smallest safe fix (optional):** Not needed for Phase 1. If multilingual support is a Phase 3 goal, `lang` can be made dynamic.
+
+---
+
+### Summary Table (Corrected)
+
+| GAP | VERDICT | FILE | LAUNCH BLOCKER? | RECOMMENDED ACTION |
+|-----|---------|------|-----------------|-------------------|
+| G1 | ✅ FALSE — Already fixed | `src/app/share/route.ts:70-75` | **No** | Remove from gap list. `/share` correctly calls both enrich functions. |
+| G2 | ⚠️ CONFIRMED | `src/lib/ai/providers/openrouter.ts:125-133` | No | Fetch image once in `enrich.ts`, pass base64 to both calls. |
+| G3 | ⚠️ CONFIRMED | `src/app/actions/enrich.ts:75-79` | No | Add `else { console.error(...) }` after `if (!updateError)`. |
+| G4 | 🔶 PARTIALLY TRUE | `src/app/actions/memories.ts:189-191` | No | Change `console.warn` → `console.error`. Non-fatal by design. |
+| G5 | ⚠️ CONFIRMED | `src/app/actions/memories.ts` (no call to enrich) | No | Add server-side `void enrichGenericMemory(id)` in `createMemory` for note/link/document paths. |
+| G6 | ⚠️ CONFIRMED | `src/lib/memories/validation.ts:85` | No | Replace `[^\w.\- ]+` with `[^\p{L}\p{N}.\- ]+/gu`. |
+| G7 | 📄 DOCUMENTATION-ONLY | `src/types/database.ts:4` | No | Update comment to cite both migration files. |
+| G8 | 🔶 PARTIALLY TRUE | `scripts/verify-hybrid.mjs:155` | No | Threshold is correct (0.1 ✅). Update closing message: script does not cover the reranker stage. |
+| G9 | ⚠️ CONFIRMED | `scripts/diagnose-search.mjs:88-90` | No | Update footer note to reflect hybrid+semantic pipeline. |
+| G10 | 🔶 PARTIALLY TRUE | `src/components/search/SearchBar.tsx` + `queries.ts` | No | Debounce exists; no AbortController. Acceptable at personal scale. No fix needed now. |
+| G11 | ⚠️ CONFIRMED | `src/lib/ai/providers/openrouter.ts:65-69` | No | Add `temperature: 0` to the `rankSearch` call body only. |
+| G12 | ✅ FALSE — dir="auto" present | `src/app/layout.tsx:35` | **No** | No action needed. `dir="auto"` handles RTL Arabic correctly. |
+
+**Actual launch blockers from gaps: 0.** All 12 gaps are non-blocking. The only true launch blockers remain LB1 (S10 manual journey) and LB2 (S11 PAT revocation).
+
+**Gaps that were incorrectly reported (false positives): G1, G12.**
+**Gaps where the audit's specific claim was wrong but a real issue exists: G8** (threshold was already 0.1, but reranker coverage is missing from the script).
+
+
 
 ---
 

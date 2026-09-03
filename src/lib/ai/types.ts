@@ -19,6 +19,12 @@ export interface ImageDescription {
   description: string;
 }
 
+/** Combined OCR + description in a single image fetch (avoids fetching twice). */
+export interface ImageAnalysis {
+  description: string;
+  ocrText: string;
+}
+
 /** Result of extracting text from a document. */
 export interface ExtractedText {
   text: string;
@@ -51,6 +57,12 @@ export interface AIService {
 
   /** Produce a short natural-language description of an image. */
   describeImage(input: { fileUrl: string }): Promise<ImageDescription>;
+
+  /**
+   * OCR + describe in one call (fetches the image ONCE, runs both prompts).
+   * Prefer this over calling ocr() + describeImage() separately when both are needed.
+   */
+  ocrAndDescribeImage(input: { fileUrl: string }): Promise<ImageAnalysis>;
 
   /** Extract text content from a document (PDF, docx, etc.). */
   extractText(input: { fileUrl: string }): Promise<ExtractedText>;
