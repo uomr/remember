@@ -38,14 +38,22 @@ export function SignInForm({ initialError }: { initialError?: string }) {
 
       if (error) {
         setStatus('error');
-        setMessage("We couldn't send your link right now. Please try again in a moment.");
+        console.error('Supabase auth error:', error);
+        if (error.status === 429 || error.message?.toLowerCase().includes('rate limit')) {
+          setMessage(
+            'Email rate limit exceeded on Supabase (default free mailer allows ~3/hour). Please configure Custom SMTP in Supabase Dashboard or try again later.',
+          );
+        } else {
+          setMessage(error.message || "We couldn't send your link right now. Please try again in a moment.");
+        }
         return;
       }
 
       setStatus('sent');
-    } catch {
+    } catch (err) {
+      console.error('Supabase auth exception:', err);
       setStatus('error');
-      setMessage("We couldn't send your link right now. Please try again in a moment.");
+      setMessage(err instanceof Error ? err.message : "We couldn't send your link right now. Please try again in a moment.");
     }
   }
 
