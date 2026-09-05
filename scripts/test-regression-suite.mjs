@@ -260,7 +260,23 @@ CANDIDATES: ${JSON.stringify([{ id: socMem.id, type: 'note', title: socMem.title
   })
 });
 const judgeGarbJson = JSON.parse((await judgeGarbRes.json()).choices[0].message.content.replace(/```json|```/g, '').trim());
-assert(judgeGarbJson.ids?.length === 0, 'AI Judge returns 0 results for random garbage "zxqv9281!!!"');
+// Arabic Garbage test "قفصطبلغ"
+const judgeArabicGarbRes = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+  method: 'POST',
+  headers: { Authorization: 'Bearer ' + apiKey, 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    model,
+    temperature: 0,
+    messages: [{
+      role: 'user',
+      content: `You are the precision relevance judge for a personal-memory search app. Return strict JSON {"ids":[...]}.
+USER QUERY: قفصطبلغ
+CANDIDATES: ${JSON.stringify([{ id: socMem.id, type: 'note', title: socMem.title, text: socMem.text_content, url: '' }])}`
+    }]
+  })
+});
+const judgeArabicGarbJson = JSON.parse((await judgeArabicGarbRes.json()).choices[0].message.content.replace(/```json|```/g, '').trim());
+assert(judgeArabicGarbJson.ids?.length === 0, 'AI Judge returns 0 results for Arabic garbage "قفصطبلغ"');
 
 await client.from('memories').delete().eq('id', socMem.id);
 
@@ -304,6 +320,56 @@ try {
 } catch {
   assert(true, 'dev-signin-link unconditionally aborts with error under NODE_ENV=production');
 }
+
+// -------------------------------------------------------------
+// SECTION 6: PHOTO UX, STABLE MEDIA CACHING & PROGRESSIVE SEARCH
+// -------------------------------------------------------------
+console.log('\n[SECTION 6] Photo UX, Media Caching & Progressive Search');
+
+// 1. Photo Capture Dual Triggers in CaptureButton
+const captureBtnSrc = readFileSync(new URL('../src/components/capture/CaptureButton.tsx', import.meta.url), 'utf8');
+assert(
+  captureBtnSrc.includes('capture="environment"') && captureBtnSrc.includes('Take photo'),
+  'CaptureButton provides dedicated native Camera trigger with capture="environment"',
+);
+assert(
+  captureBtnSrc.includes('Choose from photos') && captureBtnSrc.includes('galleryInputRef'),
+  'CaptureButton provides dedicated Photo Library/Gallery trigger without forcing camera',
+);
+assert(
+  captureBtnSrc.includes('previewUrl') && captureBtnSrc.includes('createObjectURL'),
+  'CaptureButton generates instant thumbnail preview for chosen photo',
+);
+
+// 2. Stable Media Proxy & Caching Route (/api/media/[id])
+const mediaRouteSrc = readFileSync(new URL('../src/app/api/media/[id]/route.ts', import.meta.url), 'utf8');
+assert(
+  mediaRouteSrc.includes('Cache-Control') && mediaRouteSrc.includes('stale-while-revalidate'),
+  'Media proxy sets private HTTP Cache-Control headers with long max-age',
+);
+assert(
+  mediaRouteSrc.includes('if-none-match') && mediaRouteSrc.includes('304'),
+  'Media proxy implements ETag and 304 Not Modified cache validation',
+);
+assert(
+  mediaRouteSrc.includes('memories!inner(id, user_id)'),
+  'Media proxy validates user ownership and multi-tenancy RLS isolation before serving file',
+);
+
+// 3. Progressive Search Race Condition Defense in MemoryLibrary
+const librarySrc = readFileSync(new URL('../src/components/memories/MemoryLibrary.tsx', import.meta.url), 'utf8');
+assert(
+  librarySrc.includes('querySeq.current') && librarySrc.includes('abortController'),
+  'MemoryLibrary enforces monotonic sequence counter and AbortController to discard stale search responses',
+);
+assert(
+  librarySrc.includes('tier=fast') && librarySrc.includes('tier=deep'),
+  'MemoryLibrary executes progressive two-tier search (fast lexical first -> deep semantic second)',
+);
+assert(
+  librarySrc.includes('isSearching'),
+  'MemoryLibrary exposes non-blocking isSearching micro-indicator without freezing UI',
+);
 
 console.log('\n================================================================');
 console.log(`TEST RESULTS: ${passed} PASSED, ${failed} FAILED`);

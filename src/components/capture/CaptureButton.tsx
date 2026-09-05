@@ -24,12 +24,16 @@ export function CaptureButton() {
   const [mounted, setMounted] = useState(false);
   const [open, setOpen] = useState(false);
   const [kind, setKind] = useState<CaptureKind | null>(null);
+  const [selectedImage, setSelectedImage] = useState<File | null>(null);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [initialUrl, setInitialUrl] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [pending, startTransition] = useTransition();
   const formRef = useRef<HTMLFormElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const cameraInputRef = useRef<HTMLInputElement>(null);
+  const galleryInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     setMounted(true);
@@ -39,6 +43,17 @@ export function CaptureButton() {
     setKind(null);
     setError(null);
     setInitialUrl('');
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+    setSelectedImage(null);
+    setPreviewUrl(null);
+  }
+
+  function handleImageSelected(file: File | null) {
+    if (!file) return;
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+    setSelectedImage(file);
+    setPreviewUrl(URL.createObjectURL(file));
+    setError(null);
   }
 
   function close() {
@@ -105,12 +120,16 @@ export function CaptureButton() {
       setKind(selectedKind);
       setOpen(true);
 
-      // Pre-fill file input on next tick
-      setTimeout(() => {
-        if (fileInputRef.current && e.dataTransfer) {
-          fileInputRef.current.files = e.dataTransfer.files;
-        }
-      }, 50);
+      if (isImg) {
+        handleImageSelected(file);
+      } else {
+        // Pre-fill file input for documents
+        setTimeout(() => {
+          if (fileInputRef.current && e.dataTransfer) {
+            fileInputRef.current.files = e.dataTransfer.files;
+          }
+        }, 50);
+      }
     }
 
     window.addEventListener('dragenter', onDragEnter);
@@ -164,6 +183,14 @@ export function CaptureButton() {
 
     const formData = new FormData(event.currentTarget);
     formData.set('type', kind);
+
+    if (kind === 'image') {
+      if (!selectedImage) {
+        setError('Please select or take a photo first.');
+        return;
+      }
+      formData.set('file', selectedImage);
+    }
 
     const savingKind = kind;
 
@@ -316,10 +343,115 @@ export function CaptureButton() {
                       </div>
                     ) : null}
 
-                    {kind === 'image' || kind === 'document' ? (
+                    {kind === 'image' ? (
+                      <div className="space-y-3">
+                        <input
+                          ref={cameraInputRef}
+                          type="file"
+                          accept="image/*"
+                          capture="environment"
+                          className="sr-only"
+                          onChange={(e) => handleImageSelected(e.target.files?.[0] ?? null)}
+                        />
+                        <input
+                          ref={galleryInputRef}
+                          type="file"
+                          accept="image/*"
+                          className="sr-only"
+                          onChange={(e) => handleImageSelected(e.target.files?.[0] ?? null)}
+                        />
+
+                        {!selectedImage ? (
+                          <div className="space-y-3">
+                            <label className="block text-sm font-medium text-ink">
+                              Photo
+                            </label>
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                              <button
+                                type="button"
+                                onClick={() => cameraInputRef.current?.click()}
+                                className="flex items-center justify-center gap-2.5 rounded-2xl border border-border bg-surface px-5 py-4 text-ink hover:bg-surface-sunken hover:border-border-strong active:scale-[0.99] transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                              >
+                                <svg
+                                  className="h-5 w-5 text-accent shrink-0"
+                                  fill="none"
+                                  viewBox="0 0 24 24"
+                                  stroke="currentColor"
+                                  strokeWidth={1.5}
+                                >
+                                  <path
+                                    strokeLinecap="round"
+                                    strokeLinejoin="round"
+                                    d="M6.827 6.175A2.31 2.31 0 015.186 7.23c-.38.054-.757.112-1.134.175C2.999 7.58 2.25 8.507 2.25 9.574V18a2.25 2.25 0 002.25 2.25h15A2.25 2.25 0 0021.75 18V9.574c0-1.067-.75-1.994-1.802-2.169a47.865 47.865 0 00-1.134-.175 2.31 2.31 0 01-1.64-1.055l-.822-1.316a2.192 2.192 0 00-1.736-1.039 48.774 48.774 0 00-5.232 0 2.192 2.192 0 00-1.736 1.039l-.821 1.316z"
+                                  />
+                                  <path
+                                    strokeLinecap="round"
+                                    strokeLinejoin="round"
+                                    d="M16.5 12.75a4.5 4.5 0 11-9 0 4.5 4.5 0 019 0zM18.75 10.5h.008v.008h-.008V10.5z"
+                                  />
+                                </svg>
+                                <span className="font-medium text-base">Take photo</span>
+                              </button>
+
+                              <button
+                                type="button"
+                                onClick={() => galleryInputRef.current?.click()}
+                                className="flex items-center justify-center gap-2.5 rounded-2xl border border-border bg-surface px-5 py-4 text-ink hover:bg-surface-sunken hover:border-border-strong active:scale-[0.99] transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                              >
+                                <svg
+                                  className="h-5 w-5 text-accent shrink-0"
+                                  fill="none"
+                                  viewBox="0 0 24 24"
+                                  stroke="currentColor"
+                                  strokeWidth={1.5}
+                                >
+                                  <rect x="3" y="3" width="18" height="18" rx="4" />
+                                  <circle cx="8.5" cy="8.5" r="1.5" />
+                                  <path
+                                    strokeLinecap="round"
+                                    strokeLinejoin="round"
+                                    d="M21 15l-5-5L5 21"
+                                  />
+                                </svg>
+                                <span className="font-medium text-base">Choose from photos</span>
+                              </button>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="space-y-3">
+                            <div className="relative overflow-hidden rounded-2xl border border-border bg-surface-sunken max-h-56 flex items-center justify-center">
+                              {previewUrl ? (
+                                // eslint-disable-next-line @next/next/no-img-element
+                                <img
+                                  src={previewUrl}
+                                  alt="Chosen photo preview"
+                                  className="max-h-56 w-full object-contain"
+                                />
+                              ) : null}
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setSelectedImage(null);
+                                  if (previewUrl) URL.revokeObjectURL(previewUrl);
+                                  setPreviewUrl(null);
+                                }}
+                                className="absolute top-2 right-2 rounded-lg bg-black/60 backdrop-blur-sm px-2.5 py-1 text-xs text-white/90 hover:bg-black/80 transition-colors"
+                              >
+                                Change
+                              </button>
+                            </div>
+                            <p className="text-xs text-ink-muted truncate">
+                              {selectedImage.name} ({Math.round(selectedImage.size / 1024)} KB)
+                            </p>
+                          </div>
+                        )}
+                      </div>
+                    ) : null}
+
+                    {kind === 'document' ? (
                       <div className="space-y-2">
                         <label htmlFor="capture-file" className="block text-sm font-medium text-ink">
-                          {kind === 'image' ? 'Image' : 'Document'}
+                          Document
                         </label>
                         <input
                           ref={fileInputRef}
@@ -327,7 +459,7 @@ export function CaptureButton() {
                           name="file"
                           type="file"
                           required
-                          accept={kind === 'image' ? 'image/*' : '.pdf,.txt,.md,.doc,.docx'}
+                          accept=".pdf,.txt,.md,.doc,.docx"
                           className="block w-full text-sm text-ink-muted file:mr-4 file:rounded-xl file:border-0 file:bg-accent-soft dark:file:bg-accent-soft-dark file:px-4 file:py-2 file:text-sm file:font-medium file:text-accent hover:file:bg-border"
                         />
                       </div>

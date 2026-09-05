@@ -1,8 +1,7 @@
 import { createClient } from '@/lib/supabase/server';
 import { listMemories, searchMemories } from '@/lib/memories/queries';
 import { CaptureButton } from '@/components/capture/CaptureButton';
-import { SearchBar } from '@/components/search/SearchBar';
-import { MemoryList } from '@/components/memories/MemoryList';
+import { MemoryLibrary } from '@/components/memories/MemoryLibrary';
 import { AppHeader } from '@/components/layout/AppHeader';
 import { OfflineBanner } from '@/components/layout/OfflineBanner';
 import { PWAInstallPrompt } from '@/components/pwa/PWAInstallPrompt';
@@ -12,8 +11,8 @@ import { PWAInstallPrompt } from '@/components/pwa/PWAInstallPrompt';
  * and help you save something. Route protection (redirect to /sign-in) is
  * handled in middleware, so if we reach here we have a session.
  *
- * Features sticky frosted glass header, orchestrated page-load sequence,
- * and seamless PWA install prompt.
+ * Features sticky frosted glass header, progressive two-tier search,
+ * stable media caching, and seamless PWA install prompt.
  */
 export const dynamic = 'force-dynamic';
 
@@ -41,30 +40,19 @@ export default async function HomePage({
       {/* Non-blocking calm offline banner (P1.14) */}
       <OfflineBanner />
 
-      {/* Orchestrated rise-in motion sequence (P1.6) */}
-      <section className="space-y-4">
-        <div className="animate-rise-in" style={{ animationDelay: '60ms' }}>
-          <SearchBar initialQuery={query} />
-        </div>
+      {/* Orchestrated memory library with progressive search and capture */}
+      <MemoryLibrary
+        initialMemories={memories}
+        initialHasMore={hasMore}
+        initialQuery={query}
+      >
         <div className="animate-rise-in" style={{ animationDelay: '120ms' }}>
           <CaptureButton />
         </div>
-      </section>
-
-      <section className="mt-10 space-y-4">
-        <h2 className="text-xs font-semibold uppercase tracking-wider text-ink-faint">
-          {query ? 'Results' : 'Recent memories'}
-        </h2>
-        <MemoryList
-          initialMemories={memories}
-          initialHasMore={hasMore}
-          query={query || undefined}
-        />
-      </section>
+      </MemoryLibrary>
 
       {/* Behavior-driven PWA install prompt (P1.13) */}
       <PWAInstallPrompt />
     </main>
   );
 }
-

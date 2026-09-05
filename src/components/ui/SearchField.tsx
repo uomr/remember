@@ -3,11 +3,12 @@ import { forwardRef, type InputHTMLAttributes } from 'react';
 interface SearchFieldProps extends Omit<InputHTMLAttributes<HTMLInputElement>, 'type'> {
   onClear?: () => void;
   showShortcut?: boolean;
+  isSearching?: boolean;
 }
 
 /**
  * Minimal, calm search input built on the design tokens.
- * Features auto-direction (dir="auto"), clear action, and subtle focus states.
+ * Features auto-direction (dir="auto"), clear action, subtle searching indicator, and focus states.
  */
 export const SearchField = forwardRef<HTMLInputElement, SearchFieldProps>(function SearchField(
   {
@@ -16,6 +17,7 @@ export const SearchField = forwardRef<HTMLInputElement, SearchFieldProps>(functi
     value,
     onClear,
     showShortcut = true,
+    isSearching = false,
     ...props
   },
   ref
@@ -34,12 +36,25 @@ export const SearchField = forwardRef<HTMLInputElement, SearchFieldProps>(functi
         className={
           'w-full rounded-2xl border border-border bg-surface-raised px-5 py-4 text-base ' +
           'text-ink placeholder:text-ink-faint shadow-soft transition-colors ' +
-          'focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30 pr-12 ' +
+          'focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30 pr-16 ' +
           className
         }
         {...props}
       />
-      <div className="absolute right-4 flex items-center gap-1.5 pointer-events-auto">
+      <div className="absolute right-4 flex items-center gap-2 pointer-events-auto">
+        {isSearching ? (
+          <div
+            className="flex items-center gap-1.5 text-xs text-ink-muted select-none"
+            role="status"
+            aria-label="Searching memories"
+          >
+            <span className="h-2 w-2 rounded-full bg-accent animate-pulse" />
+            <span className="hidden sm:inline text-[11px] font-medium tracking-tight text-ink-faint">
+              Searching…
+            </span>
+          </div>
+        ) : null}
+
         {hasValue && onClear ? (
           <button
             type="button"
@@ -57,7 +72,7 @@ export const SearchField = forwardRef<HTMLInputElement, SearchFieldProps>(functi
               <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
             </svg>
           </button>
-        ) : showShortcut ? (
+        ) : showShortcut && !isSearching ? (
           <kbd
             aria-hidden="true"
             className="hidden sm:inline-flex h-6 select-none items-center gap-1 rounded border border-border bg-surface px-1.5 font-mono text-[11px] font-medium text-ink-faint opacity-80"

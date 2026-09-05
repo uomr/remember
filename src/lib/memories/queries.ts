@@ -1,7 +1,6 @@
 import 'server-only';
 
 import { createClient } from '@/lib/supabase/server';
-import { STORAGE_BUCKET } from '@/lib/config';
 import { getAIService } from '@/lib/ai';
 import { selectiveChunkSemanticSearch } from '@/lib/documents/semantic';
 import type { Memory, MemoryFile } from '@/types/database';
@@ -12,8 +11,6 @@ import type { Memory, MemoryFile } from '@/types/database';
  * private files are minted here, on demand, with a short lifetime.
  */
 
-/** How long a generated signed file URL stays valid (seconds). */
-const SIGNED_URL_TTL = 60 * 60; // 1 hour
 
 /** How many memories we load per page (initial load and each "load more"). */
 export const PAGE_SIZE = 24;
@@ -27,31 +24,23 @@ export interface MemoryWithFile extends Memory {
 
 const MEMORY_COLUMNS = 'id, user_id, type, title, text_content, url, created_at, updated_at';
 
-async function signFirstFile(
-  supabase: ReturnType<typeof createClient>,
+function resolveFirstFile(
+  memoryId: string,
   files: MemoryFile[] | null,
-): Promise<{ file: MemoryFile | null; fileUrl: string | null }> {
+): { file: MemoryFile | null; fileUrl: string | null } {
   const file = files && files.length > 0 ? files[0] : null;
   if (!file) return { file: null, fileUrl: null };
-
-  const { data } = await supabase.storage
-    .from(STORAGE_BUCKET)
-    .createSignedUrl(file.storage_path, SIGNED_URL_TTL);
-
-  return { file, fileUrl: data?.signedUrl ?? null };
+  return { file, fileUrl: `/api/media/${memoryId}` };
 }
 
-async function signRows(
-  supabase: ReturnType<typeof createClient>,
+function resolveRows(
   rows: (Memory & { memory_files: MemoryFile[] })[],
-): Promise<MemoryWithFile[]> {
-  return Promise.all(
-    rows.map(async (row) => {
-      const { memory_files, ...memory } = row;
-      const { file, fileUrl } = await signFirstFile(supabase, memory_files);
-      return { ...memory, file, fileUrl };
-    }),
-  );
+): MemoryWithFile[] {
+  return rows.map((row) => {
+    const { memory_files, ...memory } = row;
+    const { file, fileUrl } = resolveFirstFile(memory.id, memory_files);
+    return { ...memory, file, fileUrl };
+  });
 }
 
 /** A page of memories plus whether more remain (for "load more"). */
@@ -79,7 +68,7 @@ export async function listMemories(offset = 0, limit = PAGE_SIZE): Promise<Memor
   const rows = (hasMore ? data.slice(0, limit) : data) as (Memory & {
     memory_files: MemoryFile[];
   })[];
-  return { memories: await signRows(supabase, rows), hasMore };
+  return { memories: resolveRows(rows), hasMore };
 }
 
 /** Columns the substring pass scans. `search_vector` already covers stemming. */
@@ -382,21 +371,32 @@ function extractUrlTarget(query: string): string | null {
  * RLS scopes ALL paths to the caller. Zero AI cost for exact lexical queries.
  * Results are ordered by fused relevance and returned as ONE Memory per result.
  */
-export async function searchMemories(
+export interface FastSearchResult {
+  memories: MemoryWithFile[];
+  hasMore: boolean;
+  fastIds: string[];
+}
+
+/**
+ * Tier 1 Search: Pure PostgreSQL index search (URL + Title/Text/Chunk lexical).
+ * Blazing fast (< 30ms), zero AI tokens, zero OpenRouter latency.
+ */
+export async function searchMemoriesFast(
   query: string,
   offset = 0,
   limit = PAGE_SIZE,
-): Promise<MemoryPage> {
+): Promise<FastSearchResult> {
   const trimmed = query.trim();
-  if (!trimmed) return listMemories(offset, limit);
+  if (!trimmed) {
+    const page = await listMemories(offset, limit);
+    return { memories: page.memories, hasMore: page.hasMore, fastIds: [] };
+  }
 
   const filter = buildSearchFilter(trimmed);
-  if (!filter) return { memories: [], hasMore: false };
-
   const terms = tokenize(trimmed);
   const supabase = createClient();
 
-  // Deterministic literal URL / domain search pass (parameterized, wildcards escaped)
+  // 1. Literal URL / domain search pass (parameterized, wildcards escaped)
   const urlTarget = extractUrlTarget(trimmed);
   let urlMatchIds: string[] = [];
   if (urlTarget) {
@@ -411,16 +411,71 @@ export async function searchMemories(
     }
   }
 
-  // Lexical passes (ultra-fast <5ms)
-  const [rawLexicalIds, chunkIds] = await Promise.all([
-    lexicalCandidateIds(supabase, filter, HYBRID_CANDIDATE_POOL),
-    chunkLexicalCandidateIds(supabase, terms, HYBRID_CANDIDATE_POOL),
-  ]);
+  // 2. Lexical passes
+  let rawLexicalIds: string[] = [];
+  let chunkIds: string[] = [];
+  if (filter) {
+    const [raw, chunks] = await Promise.all([
+      lexicalCandidateIds(supabase, filter, HYBRID_CANDIDATE_POOL),
+      chunkLexicalCandidateIds(supabase, terms, HYBRID_CANDIDATE_POOL),
+    ]);
+    rawLexicalIds = raw;
+    chunkIds = chunks;
+  }
 
   const lexicalIds = Array.from(new Set([...urlMatchIds, ...rawLexicalIds]));
-  const hasDenseLexicalHits = (rawLexicalIds.length + chunkIds.length) >= 2;
+  const allLexicalIds = Array.from(new Set([...lexicalIds, ...chunkIds]));
 
-  // Semantic pass (adaptively expands only if lexical hits are sparse)
+  let rankedIds = allLexicalIds;
+  if (urlMatchIds.length > 0) {
+    const urlSet = new Set(urlMatchIds);
+    rankedIds = [...urlMatchIds, ...rankedIds.filter((id) => !urlSet.has(id))];
+  }
+
+  if (rankedIds.length === 0) {
+    return { memories: [], hasMore: false, fastIds: [] };
+  }
+
+  const pageIds = rankedIds.slice(offset, offset + limit);
+  const { data, error } = await supabase
+    .from('memories')
+    .select(`${MEMORY_COLUMNS}, memory_files ( * )`)
+    .in('id', pageIds);
+
+  if (error || !data) return { memories: [], hasMore: false, fastIds: rankedIds };
+
+  const candidateRows = data as (Memory & { memory_files: MemoryFile[] })[];
+  const byId = new Map(candidateRows.map((row) => [row.id, row]));
+
+  const rows = pageIds.flatMap((id) => {
+    const row = byId.get(id);
+    return row ? [row] : [];
+  });
+
+  return {
+    memories: resolveRows(rows),
+    hasMore: rankedIds.length > offset + limit,
+    fastIds: rankedIds,
+  };
+}
+
+/**
+ * Tier 2 Search: Semantic + Cross-lingual + AI Reranker.
+ * Runs in background or when Tier 1 results are sparse (< 2) or query is non-Latin/conceptual.
+ */
+export async function searchMemoriesDeep(
+  query: string,
+  offset = 0,
+  limit = PAGE_SIZE,
+  fastIds: string[] = [],
+): Promise<MemoryPage> {
+  const trimmed = query.trim();
+  if (!trimmed) return listMemories(offset, limit);
+
+  const supabase = createClient();
+  const hasDenseLexicalHits = fastIds.length >= 2;
+
+  // Semantic pass (adaptively expands query if Arabic/non-Latin and lexical hits are sparse)
   const semanticIds = await semanticCandidateIds(
     supabase,
     trimmed,
@@ -428,11 +483,9 @@ export async function searchMemories(
     hasDenseLexicalHits,
   );
 
-  // Selective chunk semantic expansion (M2B):
-  // Evaluates representative chunks of candidate documents only when lexical matches are sparse
-  // or absent (handles conceptual, paraphrased, and cross-lingual queries).
+  // Selective chunk semantic expansion for conceptual queries
   let chunkSemanticIds: string[] = [];
-  if (shouldPerformSelectiveChunkSemanticSearch(lexicalIds.length, chunkIds.length)) {
+  if (shouldPerformSelectiveChunkSemanticSearch(fastIds.length, 0)) {
     try {
       chunkSemanticIds = await selectiveChunkSemanticSearch(
         supabase,
@@ -441,39 +494,39 @@ export async function searchMemories(
         HYBRID_CANDIDATE_POOL,
       );
     } catch {
-      // Best-effort: failures never break lexical search
+      // Best-effort: failures never break search
     }
   }
 
-  const allChunkIds = Array.from(new Set([...chunkIds, ...chunkSemanticIds]));
-  const allLexicalIds = Array.from(new Set([...lexicalIds, ...chunkIds]));
-  const retrievedIds = reciprocalRankFusion([lexicalIds, allChunkIds, semanticIds]);
+  const allChunkIds = Array.from(new Set(chunkSemanticIds));
+  const retrievedIds = reciprocalRankFusion([fastIds, allChunkIds, semanticIds]);
   if (retrievedIds.length === 0) return { memories: [], hasMore: false };
 
-  // Load candidate evidence once.
   const { data, error } = await supabase
     .from('memories')
     .select(`${MEMORY_COLUMNS}, memory_files ( * )`)
     .in('id', retrievedIds);
+
   if (error || !data) return { memories: [], hasMore: false };
 
   const candidateRows = data as (Memory & { memory_files: MemoryFile[] })[];
   const byId = new Map(candidateRows.map((row) => [row.id, row]));
 
-  // Fallback: use lexical matches if present; otherwise use fused semantic order.
-  let rankedIds = allLexicalIds.length > 0
-    ? allLexicalIds.filter((id) => byId.has(id))
+  let rankedIds = fastIds.length > 0
+    ? fastIds.filter((id) => byId.has(id))
     : retrievedIds.filter((id) => byId.has(id));
 
-  // Prepend direct URL matches so literal URL searches are always deterministic and top-ranked
-  if (urlMatchIds.length > 0) {
-    const urlSet = new Set(urlMatchIds);
-    rankedIds = [...urlMatchIds, ...rankedIds.filter((id) => !urlSet.has(id))];
+  // Merge any semantic hits that aren't in fastIds
+  const rankedSet = new Set(rankedIds);
+  for (const id of retrievedIds) {
+    if (!rankedSet.has(id) && byId.has(id)) {
+      rankedIds.push(id);
+      rankedSet.add(id);
+    }
   }
 
   const ai = getAIService();
-  const isUrlDirectHit = urlMatchIds.length > 0 && urlMatchIds.length <= 4;
-  if (ai.enabled && !isUrlDirectHit && shouldCallReranker(allLexicalIds, retrievedIds)) {
+  if (ai.enabled && shouldCallReranker(fastIds, retrievedIds)) {
     try {
       const candidateIdsForJudge = retrievedIds.slice(0, RERANKER_MAX_CANDIDATES);
       const judged = await ai.rankSearch({
@@ -493,7 +546,7 @@ export async function searchMemories(
       });
       rankedIds = judged.ids;
     } catch {
-      // Conservative lexical fallback above is intentionally retained.
+      // Conservative fallback retained
     }
   }
 
@@ -505,10 +558,34 @@ export async function searchMemories(
     const row = byId.get(id);
     return row ? [row] : [];
   });
-  return { memories: await signRows(supabase, rows), hasMore };
+  return { memories: resolveRows(rows), hasMore };
 }
 
-/** Fetch a single memory by id (RLS ensures ownership), with a signed file URL. */
+/**
+ * Unified search (used for SSR in page.tsx and server-side callers).
+ * Coordinates fast pass first, upgrading to deep pass only when needed.
+ */
+export async function searchMemories(
+  query: string,
+  offset = 0,
+  limit = PAGE_SIZE,
+): Promise<MemoryPage> {
+  const trimmed = query.trim();
+  if (!trimmed) return listMemories(offset, limit);
+
+  const fast = await searchMemoriesFast(trimmed, offset, limit);
+  const hasArabic = /[\u0600-\u06FF]/.test(trimmed);
+
+  // If fast results are exact and sufficient (>= 3) and not Arabic, return immediately ($0 AI)
+  if (fast.memories.length >= 3 && !hasArabic) {
+    return { memories: fast.memories, hasMore: fast.hasMore };
+  }
+
+  // Otherwise, run deep semantic retrieval
+  return searchMemoriesDeep(trimmed, offset, limit, fast.fastIds);
+}
+
+/** Fetch a single memory by id (RLS ensures ownership). */
 export async function getMemory(id: string): Promise<MemoryWithFile | null> {
   const supabase = createClient();
 
@@ -521,6 +598,6 @@ export async function getMemory(id: string): Promise<MemoryWithFile | null> {
   if (error || !data) return null;
 
   const { memory_files, ...memory } = data as Memory & { memory_files: MemoryFile[] };
-  const { file, fileUrl } = await signFirstFile(supabase, memory_files);
+  const { file, fileUrl } = resolveFirstFile(memory.id, memory_files);
   return { ...memory, file, fileUrl };
 }
