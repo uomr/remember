@@ -36,6 +36,8 @@ export interface ExtractedDocument {
   parserVersion: string;
   /** True if the document text was truncated due to hard safety limits */
   truncated: boolean;
+  /** Specific extraction issue if encountered (e.g. encrypted/password, corrupted) */
+  errorReason?: string;
 }
 
 export interface DocumentChunk {

@@ -10,8 +10,8 @@
  * Only the first bytes are read, so this is cheap even for large files.
  */
 
-/** How many leading bytes we need to identify every signature we care about. */
-const SNIFF_BYTES = 16;
+/** How many leading bytes we need to identify every signature we care about (ISO 32000-1 §7.5.2 permits PDF header up to offset 1024). */
+const SNIFF_BYTES = 1024;
 
 /** A canonical family we can detect from bytes, mapped to the MIME(s) it backs. */
 type SignatureFamily =
@@ -37,6 +37,7 @@ const MIME_TO_FAMILY: Record<string, SignatureFamily> = {
   'image/heic': 'heic',
   'application/pdf': 'pdf',
   'application/x-pdf': 'pdf',
+  'application/vnd.pdf': 'pdf',
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'zip',
   'application/msword': 'ole',
 };
@@ -47,6 +48,22 @@ function startsWith(bytes: Uint8Array, prefix: readonly number[], offset = 0): b
     if (bytes[offset + i] !== prefix[i]) return false;
   }
   return true;
+}
+
+/** Check if a byte pattern exists anywhere within the scan limit (e.g. %PDF- up to offset 1024). */
+function containsSequence(bytes: Uint8Array, seq: readonly number[], maxScan = 1024): boolean {
+  const limit = Math.min(bytes.length - seq.length, maxScan);
+  for (let i = 0; i <= limit; i += 1) {
+    let match = true;
+    for (let j = 0; j < seq.length; j += 1) {
+      if (bytes[i + j] !== seq[j]) {
+        match = false;
+        break;
+      }
+    }
+    if (match) return true;
+  }
+  return false;
 }
 
 /** Detect the file family from its leading bytes. Returns 'unknown' if none match. */
@@ -66,8 +83,8 @@ export function detectFamily(bytes: Uint8Array): SignatureFamily {
     const brand = String.fromCharCode(...bytes.slice(8, 12));
     if (['heic', 'heix', 'hevc', 'heim', 'heis', 'mif1', 'msf1'].includes(brand)) return 'heic';
   }
-  // PDF: "%PDF-"
-  if (startsWith(bytes, [0x25, 0x50, 0x44, 0x46, 0x2d])) return 'pdf';
+  // PDF: "%PDF-" anywhere in header (ISO 32000-1 §7.5.2 permits up to offset 1024; accommodates UTF-8 BOM or mobile scanner headers)
+  if (containsSequence(bytes, [0x25, 0x50, 0x44, 0x46, 0x2d], 1024)) return 'pdf';
   // ZIP (docx and friends): "PK" 03 04 / 05 06 / 07 08
   if (
     startsWith(bytes, [0x50, 0x4b, 0x03, 0x04]) ||

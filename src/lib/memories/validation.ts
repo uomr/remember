@@ -36,8 +36,23 @@ function formatMb(bytes: number): string {
  * generic octet-stream.
  */
 export function resolveEffectiveMime(file: File): string {
-  const type = (file.type || '').trim().toLowerCase();
-  if (type && type !== 'application/octet-stream' && type !== 'binary/octet-stream') {
+  // Strip MIME parameters e.g. "application/pdf; charset=binary" -> "application/pdf"
+  const type = (file.type || '').split(';')[0]?.trim().toLowerCase() ?? '';
+
+  const GENERIC_MOBILE_TYPES = new Set([
+    'application/octet-stream',
+    'binary/octet-stream',
+    'application/download',
+    'application/x-download',
+    'application/unknown',
+    'unknown/unknown',
+  ]);
+
+  if (type === 'application/x-pdf' || type === 'application/vnd.pdf') {
+    return 'application/pdf';
+  }
+
+  if (type && !GENERIC_MOBILE_TYPES.has(type)) {
     return type;
   }
 

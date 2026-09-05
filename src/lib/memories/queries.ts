@@ -4,6 +4,7 @@ import { createClient } from '@/lib/supabase/server';
 import { getAIService } from '@/lib/ai';
 import { selectiveChunkSemanticSearch } from '@/lib/documents/semantic';
 import { normalizeArabicForSearch } from '@/lib/documents/extract';
+import { parseQueryIntent, type ParsedQuery } from '@/lib/memories/queryUnderstanding';
 import type { Memory, MemoryFile } from '@/types/database';
 
 /**
@@ -373,6 +374,206 @@ function extractUrlTarget(query: string): string | null {
 }
 
 /**
+ * Structured Intent candidate ids from memories table.
+ * Queries title, url, text_content for extracted numeric formats (quoted if comma),
+ * month representations, and concept expansions.
+ */
+async function intentCandidateIds(
+  supabase: ReturnType<typeof createClient>,
+  intent: ParsedQuery,
+  limit: number,
+): Promise<string[]> {
+  if (!intent.hasStructuredIntent) return [];
+  const orConditions: string[] = [];
+
+  for (const num of intent.numbers) {
+    if (num.includes(',')) {
+      orConditions.push(`text_content.ilike."%${num}%"`, `title.ilike."%${num}%"`);
+    } else {
+      orConditions.push(`text_content.ilike.%${num}%`, `title.ilike.%${num}%`);
+    }
+  }
+
+  for (const m of intent.months) {
+    if (m.length >= 2) {
+      orConditions.push(`text_content.ilike.%${m}%`, `title.ilike.%${m}%`);
+    }
+  }
+
+  for (const ex of intent.expandedTokens) {
+    if (ex.length >= 3) {
+      orConditions.push(`text_content.ilike.%${ex}%`, `title.ilike.%${ex}%`);
+    }
+  }
+
+  if (orConditions.length === 0) return [];
+  const uniqueConds = Array.from(new Set(orConditions)).slice(0, 40);
+
+  const { data, error } = await supabase
+    .from('memories')
+    .select('id')
+    .or(uniqueConds.join(','))
+    .limit(limit);
+
+  if (error || !data) return [];
+  return (data as { id: string }[]).map((r) => r.id);
+}
+
+/**
+ * Structured Intent candidate ids from memory_chunks table.
+ */
+async function chunkIntentCandidateIds(
+  supabase: ReturnType<typeof createClient>,
+  intent: ParsedQuery,
+  limit: number,
+): Promise<string[]> {
+  if (!intent.hasStructuredIntent) return [];
+  const orConditions: string[] = [];
+
+  for (const num of intent.numbers) {
+    if (num.includes(',')) {
+      orConditions.push(`chunk_text.ilike."%${num}%"`);
+    } else {
+      orConditions.push(`chunk_text.ilike.%${num}%`);
+    }
+  }
+
+  for (const m of intent.months) {
+    if (m.length >= 2) {
+      orConditions.push(`chunk_text.ilike.%${m}%`);
+    }
+  }
+
+  for (const ex of intent.expandedTokens) {
+    if (ex.length >= 3) {
+      orConditions.push(`chunk_text.ilike.%${ex}%`);
+    }
+  }
+
+  if (orConditions.length === 0) return [];
+  const uniqueConds = Array.from(new Set(orConditions)).slice(0, 40);
+
+  try {
+    const { data, error } = await supabase
+      .from('memory_chunks')
+      .select('memory_id')
+      .or(uniqueConds.join(','))
+      .limit(limit);
+
+    if (error || !data) return [];
+    const ids = new Set<string>();
+    for (const r of data) {
+      const mid = (r as { memory_id?: unknown })?.memory_id;
+      if (typeof mid === 'string') ids.add(mid);
+    }
+    return Array.from(ids);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Multi-dimensional compound scoring & negative constraint enforcement.
+ */
+function rankCandidatesByCompoundIntent(
+  candidates: (Memory & { memory_files: MemoryFile[] })[],
+  intent: ParsedQuery,
+  terms: string[],
+  chunksByMemoryId: Map<string, string[]>,
+): string[] {
+  const scored: { id: string; score: number }[] = [];
+
+  for (const mem of candidates) {
+    const fullText = normalizeArabicForSearch(`${mem.title || ''} ${mem.text_content || ''}`);
+    const chunkTexts = (chunksByMemoryId.get(mem.id) || [])
+      .map(normalizeArabicForSearch)
+      .join(' ');
+    const combined = `${fullText} ${chunkTexts}`.toLowerCase();
+
+    // 1. Numeric Match (standalone boundary — prevents matching account number slices)
+    let matchedNumber = false;
+    if (intent.numbers.length > 0) {
+      matchedNumber = intent.numbers.some((num) => {
+        const cleanNum = num.replace(/,/g, '');
+        if (/[^\d]/.test(cleanNum)) {
+          return combined.includes(cleanNum.toLowerCase());
+        }
+        const regex = new RegExp(`(^|[^0-9])${cleanNum}([^0-9]|$)`);
+        return regex.test(combined) || (num.includes(',') && combined.includes(num.toLowerCase()));
+      });
+    }
+
+    // 2. Month Match (contextual or word boundary)
+    let matchedMonth = false;
+    if (intent.months.length > 0) {
+      matchedMonth = intent.months.some((m) => {
+        if (/[a-zA-Z\u0600-\u06FF]/.test(m)) {
+          return combined.includes(m.toLowerCase());
+        }
+        const num = String(parseInt(m, 10));
+        const monthContextRegex = new RegExp(`(شهر\\s*0?${num}|[/-]0?${num}[/-]|\\b0?${num}/)`);
+        return monthContextRegex.test(combined);
+      });
+    }
+
+    // 3. Concept Match
+    let matchedConcept = false;
+    if (intent.concepts.length > 0) {
+      matchedConcept = intent.expandedTokens.some((ex) => {
+        return combined.includes(normalizeArabicForSearch(ex).toLowerCase());
+      });
+    }
+
+    // 4. Keyword Match
+    let matchedKeywords = 0;
+    for (const t of terms) {
+      if (combined.includes(normalizeArabicForSearch(t).toLowerCase())) {
+        matchedKeywords++;
+      }
+    }
+
+    // Negative constraints:
+    // If query has explicit number requirement, and candidate does NOT match number:
+    if (intent.numbers.length > 0 && !matchedNumber) {
+      continue; // Filter out completely
+    }
+
+    // If query has explicit month requirement, and candidate does NOT match month:
+    if (intent.months.length > 0 && !matchedMonth) {
+      continue; // Filter out completely
+    }
+
+    // If candidate matches neither numbers, months, concepts, nor keywords:
+    if (!matchedNumber && !matchedMonth && !matchedConcept && matchedKeywords === 0) {
+      continue;
+    }
+
+    // Score computation
+    let score = 0;
+    if (matchedNumber) score += 120;
+    if (matchedMonth) score += 100;
+    if (matchedConcept) score += 80;
+    score += matchedKeywords * 30;
+
+    // Multidimensional synergy bonus:
+    const queryDims =
+      (intent.numbers.length > 0 ? 1 : 0) +
+      (intent.months.length > 0 ? 1 : 0) +
+      (intent.concepts.length > 0 ? 1 : 0);
+    const matchedDims =
+      (matchedNumber ? 1 : 0) + (matchedMonth ? 1 : 0) + (matchedConcept ? 1 : 0);
+
+    if (queryDims >= 3 && matchedDims >= 3) score += 400;
+    else if (queryDims >= 2 && matchedDims >= 2) score += 200;
+
+    scored.push({ id: mem.id, score });
+  }
+
+  scored.sort((a, b) => b.score - a.score);
+  return scored.map((s) => s.id);
+}
+
+/**
  * Search the current user's memories — HYBRID (lexical + chunk + semantic).
  *
  * Recall strategies run in parallel and are fused with RRF:
@@ -391,7 +592,7 @@ export interface FastSearchResult {
 }
 
 /**
- * Tier 1 Search: Pure PostgreSQL index search (URL + Title/Text/Chunk lexical).
+ * Tier 1 Search: Pure PostgreSQL index search (URL + Title/Text/Chunk lexical + Query Intent).
  * Blazing fast (< 30ms), zero AI tokens, zero OpenRouter latency.
  */
 export async function searchMemoriesFast(
@@ -405,6 +606,7 @@ export async function searchMemoriesFast(
     return { memories: page.memories, hasMore: page.hasMore, fastIds: [] };
   }
 
+  const intent = parseQueryIntent(trimmed);
   const filter = buildSearchFilter(trimmed);
   const terms = tokenize(trimmed);
   const supabase = createClient();
@@ -424,41 +626,88 @@ export async function searchMemoriesFast(
     }
   }
 
-  // 2. Lexical passes
-  let rawLexicalIds: string[] = [];
-  let chunkIds: string[] = [];
-  if (filter) {
-    const [raw, chunks] = await Promise.all([
-      lexicalCandidateIds(supabase, filter, HYBRID_CANDIDATE_POOL),
-      chunkLexicalCandidateIds(supabase, terms, HYBRID_CANDIDATE_POOL),
-    ]);
-    rawLexicalIds = raw;
-    chunkIds = chunks;
+  // 2. Parallel Candidate Recall: Direct Lexical + Structured Intent
+  const recallPromises: [
+    Promise<string[]>,
+    Promise<string[]>,
+    Promise<string[]>,
+    Promise<string[]>,
+  ] = [
+    filter ? lexicalCandidateIds(supabase, filter, HYBRID_CANDIDATE_POOL) : Promise.resolve([]),
+    terms.length > 0 ? chunkLexicalCandidateIds(supabase, terms, HYBRID_CANDIDATE_POOL) : Promise.resolve([]),
+    intent.hasStructuredIntent ? intentCandidateIds(supabase, intent, HYBRID_CANDIDATE_POOL) : Promise.resolve([]),
+    intent.hasStructuredIntent ? chunkIntentCandidateIds(supabase, intent, HYBRID_CANDIDATE_POOL) : Promise.resolve([]),
+  ];
+
+  const [rawLexicalIds, chunkIds, intentIds, chunkIntentIds] = await Promise.all(recallPromises);
+
+  const allCandidateIds = Array.from(
+    new Set([...urlMatchIds, ...rawLexicalIds, ...chunkIds, ...intentIds, ...chunkIntentIds]),
+  );
+
+  if (allCandidateIds.length === 0) {
+    return { memories: [], hasMore: false, fastIds: [] };
   }
 
-  const lexicalIds = Array.from(new Set([...urlMatchIds, ...rawLexicalIds]));
-  const allLexicalIds = Array.from(new Set([...lexicalIds, ...chunkIds]));
+  // Fetch full candidate rows for ranking
+  const { data: candidateData, error } = await supabase
+    .from('memories')
+    .select(`${MEMORY_COLUMNS}, memory_files ( * )`)
+    .in('id', allCandidateIds);
 
-  let rankedIds = allLexicalIds;
-  if (urlMatchIds.length > 0) {
-    const urlSet = new Set(urlMatchIds);
-    rankedIds = [...urlMatchIds, ...rankedIds.filter((id) => !urlSet.has(id))];
+  if (error || !candidateData || candidateData.length === 0) {
+    return { memories: [], hasMore: false, fastIds: [] };
+  }
+
+  const candidateRows = candidateData as (Memory & { memory_files: MemoryFile[] })[];
+
+  // Fetch candidate chunk texts for multi-dimensional compound scoring
+  const chunksByMemoryId = new Map<string, string[]>();
+  try {
+    const { data: chunkRows } = await supabase
+      .from('memory_chunks')
+      .select('memory_id, chunk_text')
+      .in('memory_id', allCandidateIds)
+      .limit(100);
+
+    for (const cr of chunkRows || []) {
+      const mid = (cr as { memory_id?: unknown; chunk_text?: unknown }).memory_id;
+      const ctext = (cr as { chunk_text?: unknown }).chunk_text;
+      if (typeof mid === 'string' && typeof ctext === 'string') {
+        const list = chunksByMemoryId.get(mid) || [];
+        list.push(ctext);
+        chunksByMemoryId.set(mid, list);
+      }
+    }
+  } catch {
+    // Best-effort: chunk texts are optional for scoring
+  }
+
+  // Rank candidates using compound intent and negative constraints
+  let rankedIds: string[] = [];
+  if (intent.hasStructuredIntent) {
+    rankedIds = rankCandidatesByCompoundIntent(candidateRows, intent, terms, chunksByMemoryId);
+    if (urlMatchIds.length > 0) {
+      const urlSet = new Set(urlMatchIds);
+      rankedIds = [...urlMatchIds, ...rankedIds.filter((id) => !urlSet.has(id))];
+    }
+  } else {
+    // Fallback to RRF / lexical ordering when no structured numbers/months/concepts are found
+    const lexicalIds = Array.from(new Set([...urlMatchIds, ...rawLexicalIds]));
+    const allLexicalIds = Array.from(new Set([...lexicalIds, ...chunkIds]));
+    rankedIds = allLexicalIds;
+    if (urlMatchIds.length > 0) {
+      const urlSet = new Set(urlMatchIds);
+      rankedIds = [...urlMatchIds, ...rankedIds.filter((id) => !urlSet.has(id))];
+    }
   }
 
   if (rankedIds.length === 0) {
     return { memories: [], hasMore: false, fastIds: [] };
   }
 
-  const pageIds = rankedIds.slice(offset, offset + limit);
-  const { data, error } = await supabase
-    .from('memories')
-    .select(`${MEMORY_COLUMNS}, memory_files ( * )`)
-    .in('id', pageIds);
-
-  if (error || !data) return { memories: [], hasMore: false, fastIds: rankedIds };
-
-  const candidateRows = data as (Memory & { memory_files: MemoryFile[] })[];
   const byId = new Map(candidateRows.map((row) => [row.id, row]));
+  const pageIds = rankedIds.slice(offset, offset + limit);
 
   const rows = pageIds.flatMap((id) => {
     const row = byId.get(id);
@@ -587,14 +836,22 @@ export async function searchMemories(
   if (!trimmed) return listMemories(offset, limit);
 
   const fast = await searchMemoriesFast(trimmed, offset, limit);
-  const hasArabic = /[\u0600-\u06FF]/.test(trimmed);
+  const intent = parseQueryIntent(trimmed);
 
-  // If fast results are exact and sufficient (>= 3) and not Arabic, return immediately ($0 AI)
-  if (fast.memories.length >= 3 && !hasArabic) {
+  // Fast Path: If fast results found matches via structured intent (numbers/months/concepts)
+  // or dense lexical hits (>= 3), return immediately ($0 AI, < 30ms latency)
+  if (fast.memories.length >= 1 && (intent.hasStructuredIntent || fast.memories.length >= 3)) {
     return { memories: fast.memories, hasMore: fast.hasMore };
   }
 
-  // Otherwise, run deep semantic retrieval
+  // Negative constraint fast-exit:
+  // If an explicit number was queried (e.g. "50000") and no memory contains it,
+  // do NOT invoke semantic retrieval to avoid false-positive hallucinations
+  if (fast.memories.length === 0 && intent.numbers.length > 0) {
+    return { memories: [], hasMore: false };
+  }
+
+  // Otherwise, run deep semantic retrieval for ambiguous or conceptual queries
   return searchMemoriesDeep(trimmed, offset, limit, fast.fastIds);
 }
 

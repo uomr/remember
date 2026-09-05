@@ -230,15 +230,16 @@ export async function enrichDocumentMemory(memoryId: string): Promise<void> {
     );
 
     if (!extracted.rawText.trim()) {
-      // Empty text (e.g. scanned PDF with no text layer or blank document).
+      // Empty text: distinguish between parser failures (password / corrupted) vs scanned (no text layer)
+      const isExplicitFailure = Boolean(extracted.errorReason);
       await supabase
         .from('memories')
         .update({
           file_hash: extracted.fileHash,
           content_hash: extracted.contentHash,
           parser_version: PARSER_VERSION,
-          extraction_status: 'skipped',
-          extraction_error: 'Scanned document with no text layer (OCR required)',
+          extraction_status: isExplicitFailure ? 'failed' : 'skipped',
+          extraction_error: extracted.errorReason || 'Scanned document with no text layer (OCR required)',
           chunk_count: 0,
         } as Record<string, unknown>)
         .eq('id', memoryId);

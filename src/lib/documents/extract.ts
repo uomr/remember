@@ -94,10 +94,63 @@ export function augmentArabicPdfText(text: string): string {
   return text;
 }
 
+/**
+ * Augments extracted document text with normalized numbers and date bridges
+ * so that comma-separated numbers (2,000 -> 2000), word numbers (2000 -> الفين),
+ * and English/Arabic month variants (August -> شهر 8) are indexable via PostgreSQL.
+ */
+export function augmentDocumentSearchTokens(text: string): string {
+  if (!text) return '';
+  const extraTokens = new Set<string>();
+
+  // 1. Numeric normalization (e.g. "2,000" -> "2000")
+  const digitMatches = text.match(/\b\d{1,3}(?:,\d{3})+(?:\.\d+)?\b/g) || [];
+  for (const dm of digitMatches) {
+    const rawDigits = dm.split('.')[0]?.replace(/,/g, '');
+    if (rawDigits) {
+      extraTokens.add(rawDigits);
+      if (rawDigits === '2000') { extraTokens.add('الفين'); extraTokens.add('ألفين'); }
+      if (rawDigits === '1000') { extraTokens.add('الف'); extraTokens.add('ألف'); }
+      if (rawDigits === '500') { extraTokens.add('خمسمائة'); extraTokens.add('خمسمية'); }
+    }
+  }
+
+  // Plain integers (e.g. 2000 -> "2,000", "الفين")
+  const plainNums = text.match(/\b\d{3,7}\b/g) || [];
+  for (const pn of plainNums) {
+    if (pn === '2000') { extraTokens.add('الفين'); extraTokens.add('ألفين'); extraTokens.add('2,000'); }
+    if (pn === '1000') { extraTokens.add('الف'); extraTokens.add('ألف'); extraTokens.add('1,000'); }
+    if (pn === '500') { extraTokens.add('خمسمائة'); extraTokens.add('خمسمية'); }
+  }
+
+  // 2. Month and concept bridges
+  const lower = text.toLowerCase();
+  if (/august|\b08\b|\/08\/|-08-|\baug\b|أغسطس|اغسطس/i.test(lower)) {
+    extraTokens.add('شهر 8'); extraTokens.add('أغسطس'); extraTokens.add('August'); extraTokens.add('08');
+  }
+  if (/january|\b01\b|\/01\/|-01-|\bjan\b|يناير/i.test(lower)) {
+    extraTokens.add('شهر 1'); extraTokens.add('يناير'); extraTokens.add('January');
+  }
+  if (/february|\b02\b|\/02\/|-02-|\bfeb\b|فبراير/i.test(lower)) {
+    extraTokens.add('شهر 2'); extraTokens.add('فبراير'); extraTokens.add('February');
+  }
+  if (/march|\b03\b|\/03\/|-03-|\bmar\b|مارس/i.test(lower)) {
+    extraTokens.add('شهر 3'); extraTokens.add('مارس'); extraTokens.add('March');
+  }
+  if (/salary|payroll|wages/i.test(lower)) {
+    extraTokens.add('راتب'); extraTokens.add('راتبي'); extraTokens.add('مرتب');
+  }
+
+  if (extraTokens.size > 0) {
+    return `${text}\n\n${Array.from(extraTokens).join(' ')}`;
+  }
+  return text;
+}
+
 // ── Plain text (TXT / MD) ────────────────────────────────────────────────────
 
 function extractPlainText(buffer: Buffer): { rawText: string; truncated: boolean } {
-  const text = normalizeExtractedText(buffer.toString('utf-8'));
+  const text = augmentDocumentSearchTokens(normalizeExtractedText(buffer.toString('utf-8')));
   const truncated = text.length > HARD_MAX_CHARS;
   return {
     rawText: text.slice(0, HARD_MAX_CHARS),
@@ -112,6 +165,7 @@ async function extractPdf(buffer: Buffer): Promise<{
   pages: DocumentPage[];
   pageCount: number;
   truncated: boolean;
+  errorReason?: string;
 }> {
   try {
     const { PDFParse } = await import('pdf-parse');
@@ -122,11 +176,11 @@ async function extractPdf(buffer: Buffer): Promise<{
     if (Array.isArray(result?.pages)) {
       for (const p of result.pages) {
         if (p && typeof p.text === 'string') {
-          const cleanedPage = normalizeExtractedText(p.text);
+          const cleanedPage = augmentDocumentSearchTokens(augmentArabicPdfText(normalizeExtractedText(p.text)));
           if (cleanedPage) {
             pages.push({
               pageNumber: typeof p.num === 'number' ? p.num : pages.length + 1,
-              text: augmentArabicPdfText(cleanedPage),
+              text: cleanedPage,
             });
           }
         }
@@ -135,7 +189,7 @@ async function extractPdf(buffer: Buffer): Promise<{
 
     const fullRaw = typeof result === 'string' ? result : (result as { text?: string })?.text ?? pages.map((p) => p.text).join('\n\n');
     const cleanedFull = normalizeExtractedText(fullRaw);
-    const augmentedFull = augmentArabicPdfText(cleanedFull);
+    const augmentedFull = augmentDocumentSearchTokens(augmentArabicPdfText(cleanedFull));
     const truncated = augmentedFull.length > HARD_MAX_CHARS;
 
     return {
@@ -145,18 +199,23 @@ async function extractPdf(buffer: Buffer): Promise<{
       truncated,
     };
   } catch (err) {
-    console.error('[extractPdf:error]', err instanceof Error ? err.message : String(err));
-    return { rawText: '', pages: [], pageCount: 0, truncated: false };
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error('[extractPdf:error]', msg);
+    let reason = 'Malformed or corrupted document';
+    if (/password|encrypt/i.test(msg)) {
+      reason = 'Password-protected or encrypted document';
+    }
+    return { rawText: '', pages: [], pageCount: 0, truncated: false, errorReason: reason };
   }
 }
 
 // ── DOCX / DOC ───────────────────────────────────────────────────────────────
 
-async function extractDocx(buffer: Buffer): Promise<{ rawText: string; truncated: boolean }> {
+async function extractDocx(buffer: Buffer): Promise<{ rawText: string; truncated: boolean; errorReason?: string }> {
   try {
     const mammoth = await import('mammoth');
     const result = await mammoth.extractRawText({ buffer });
-    const text = normalizeExtractedText(result.value ?? '');
+    const text = augmentDocumentSearchTokens(normalizeExtractedText(result.value ?? ''));
     const truncated = text.length > HARD_MAX_CHARS;
     return {
       rawText: text.slice(0, HARD_MAX_CHARS),
@@ -164,7 +223,7 @@ async function extractDocx(buffer: Buffer): Promise<{ rawText: string; truncated
     };
   } catch (err) {
     console.error('[extractDocx:error]', err instanceof Error ? err.message : String(err));
-    return { rawText: '', truncated: false };
+    return { rawText: '', truncated: false, errorReason: 'Malformed or corrupted Word document' };
   }
 }
 
@@ -191,12 +250,15 @@ export async function extractDocument(
   let pageCount: number | undefined;
   let truncated = false;
 
+  let errorReason: string | undefined;
+
   if (mime === 'application/pdf' || ext === 'pdf') {
     const pdfRes = await extractPdf(buffer);
     rawText = pdfRes.rawText;
     pages = pdfRes.pages;
     pageCount = pdfRes.pageCount;
     truncated = pdfRes.truncated;
+    errorReason = pdfRes.errorReason;
   } else if (
     mime === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
     mime === 'application/msword' ||
@@ -206,6 +268,7 @@ export async function extractDocument(
     const docxRes = await extractDocx(buffer);
     rawText = docxRes.rawText;
     truncated = docxRes.truncated;
+    errorReason = docxRes.errorReason;
   } else if (mime.startsWith('text/') || ['txt', 'md', 'markdown', 'rst'].includes(ext)) {
     const textRes = extractPlainText(buffer);
     rawText = textRes.rawText;
@@ -222,5 +285,6 @@ export async function extractDocument(
     contentHash,
     parserVersion: PARSER_VERSION,
     truncated,
+    errorReason,
   };
 }

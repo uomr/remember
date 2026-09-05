@@ -129,6 +129,7 @@ export async function createMemory(formData: FormData): Promise<ActionResult> {
       type: validation.memoryType,
       title: fileName,
       text_content: note || null,
+      extraction_status: validation.memoryType === 'document' ? 'pending' : null,
     });
 
     if (memoryError) {
