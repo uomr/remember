@@ -77,8 +77,18 @@ export const STORAGE_BUCKET = 'memories' as const;
 
 /**
  * Build the canonical storage path for a file.
- * Pattern: {user-id}/{memory-id}/{file-name}
+ * Storage key MUST be S3-safe ASCII to prevent "Invalid key" errors from Supabase Storage
+ * on mobile/WhatsApp files with en-dashes, spaces, or non-ASCII characters.
+ * Pattern: {user-id}/{memory-id}/{safe-ascii-name}
  */
 export function buildStoragePath(userId: string, memoryId: string, fileName: string): string {
-  return `${userId}/${memoryId}/${fileName}`;
+  const parts = fileName.split('.');
+  const ext = parts.length > 1 ? parts.pop()?.toLowerCase() ?? '' : '';
+  const rawBase = parts.join('.');
+  const safeBase = rawBase
+    .replace(/[^\x20-\x7E]/g, '') // strip non-ASCII (e.g. en-dash \u2013)
+    .replace(/[^a-zA-Z0-9._-]/g, '_') // collapse spaces and symbols
+    .slice(0, 60);
+  const safeName = ext ? `${safeBase || 'file'}.${ext}` : safeBase || 'file';
+  return `${userId}/${memoryId}/${safeName}`;
 }
