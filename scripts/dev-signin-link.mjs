@@ -40,8 +40,8 @@ const SERVICE =
 const APP_ORIGIN = process.env.APP_ORIGIN || 'http://localhost:3000';
 const email = process.argv[2];
 
-if (process.env.NODE_ENV === 'production' && !process.env.ALLOW_DEV_SIGNIN) {
-  console.error('dev-signin-link is disabled in production environments without ALLOW_DEV_SIGNIN=1.');
+if (process.env.NODE_ENV === 'production' || process.env.VERCEL_ENV === 'production') {
+  console.error('CRITICAL SECURITY: dev-signin-link is permanently disabled in production.');
   process.exit(1);
 }
 

@@ -76,39 +76,55 @@ const fakePdf = new File([exeBytes], 'invoice.pdf', { type: 'application/pdf' })
 const fakeVal = await verifyUpload(fakePdf);
 assert(!fakeVal.ok, 'Renamed executable claiming PDF fails signature check');
 
-// 6. Normal DOCX (zip signature PK 03 04)
-const docxBytes = new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0x14, 0x00, 0x06, 0x00]);
-const docxFile = new File([docxBytes], 'document.docx', { type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' });
+// 6. Genuine DOCX (zip with Office Open XML [Content_Types].xml entry)
+const genuineDocxHeader = Buffer.concat([
+  Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x14, 0x00, 0x00, 0x00, 0x08, 0x00]),
+  Buffer.from(' [Content_Types].xml word/document.xml'),
+]);
+const docxFile = new File([genuineDocxHeader], 'document.docx', {
+  type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+});
 const docxVal = await verifyUpload(docxFile);
-assert(docxVal.ok && docxVal.memoryType === 'document', 'Normal DOCX passes validation and signature check');
+assert(docxVal.ok && docxVal.memoryType === 'document', 'Authentic DOCX with OPC structure passes validation');
 
-// 7. DOCX with generic octet-stream
-const docxOctet = new File([docxBytes], 'document.docx', { type: 'application/octet-stream' });
+// 7. Generic ZIP file renamed to .docx (missing [Content_Types].xml / word/)
+const genericZipBytes = Buffer.concat([
+  Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x14, 0x00, 0x00, 0x00, 0x08, 0x00]),
+  Buffer.from(' photos/cat_vacation.jpg'),
+]);
+const fakeDocxFile = new File([genericZipBytes], 'archive.docx', {
+  type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+});
+const fakeDocxVal = await verifyUpload(fakeDocxFile);
+assert(!fakeDocxVal.ok, 'Generic ZIP renamed to .docx is rejected by structural OPC check');
+
+// 8. DOCX with generic octet-stream MIME resolves and passes if OPC is present
+const docxOctet = new File([genuineDocxHeader], 'document.docx', { type: 'application/octet-stream' });
 const docxOctetVal = await verifyUpload(docxOctet);
 assert(docxOctetVal.ok && docxOctetVal.memoryType === 'document', 'DOCX with application/octet-stream resolves and passes');
 
-// 8. Plain TXT
+// 9. Plain TXT
 const txtFile = new File(['Hello Remember World'], 'notes.txt', { type: 'text/plain' });
 const txtVal = await verifyUpload(txtFile);
 assert(txtVal.ok && txtVal.memoryType === 'document', 'Plain text file passes validation');
 
-// 9. Markdown MD
+// 10. Markdown MD
 const mdFile = new File(['# Architecture Notes\nClean and calm'], 'notes.md', { type: 'text/markdown' });
 const mdVal = await verifyUpload(mdFile);
 assert(mdVal.ok && mdVal.memoryType === 'document', 'Markdown file passes validation');
 
-// 10. File size near limit (24MB mock)
+// 11. File size near limit (24MB mock)
 const mock24Mb = { name: 'large.pdf', size: 24 * 1024 * 1024, type: 'application/pdf' };
 assert(validateUpload(mock24Mb).ok, '24MB document is accepted under 25MB limit');
 
-// 11. Oversized file (>25MB mock)
+// 12. Oversized file (>25MB mock)
 const mock26Mb = { name: 'huge.pdf', size: 26 * 1024 * 1024, type: 'application/pdf' };
 assert(!validateUpload(mock26Mb).ok, '26MB document is rejected over 25MB limit');
 
 // -------------------------------------------------------------
 // SECTION 2: URL SEARCH TESTS
 // -------------------------------------------------------------
-console.log('\n[SECTION 2] URL Deterministic Search');
+console.log('\n[SECTION 2] URL Deterministic Search & Parameterized Safety');
 
 const testUserId = 'bd07342f-440f-4860-83df-d21c4c0e205d';
 const urlToSave = 'https://news.ycombinator.com/item?id=39201923';
@@ -117,20 +133,44 @@ const { data: linkMem, error: linkErr } = await client.from('memories').insert({
   user_id: testUserId,
   type: 'link',
   url: urlToSave,
-  title: 'news.ycombinator.com'
+  title: 'news.ycombinator.com',
 }).select().single();
 
 assert(!linkErr && linkMem, 'Test link inserted successfully');
 
 // Direct exact URL search
 const { data: urlHitsExact } = await client.from('memories').select('id').ilike('url', '%news.ycombinator.com/item?id=39201923%');
-assert(urlHitsExact?.some(m => m.id === linkMem.id), 'Exact full URL matches via url ilike');
+assert(urlHitsExact?.some((m) => m.id === linkMem.id), 'Exact full URL matches via url ilike');
 
 // Domain-only search
 const { data: urlHitsDomain } = await client.from('memories').select('id').ilike('url', '%news.ycombinator.com%');
-assert(urlHitsDomain?.some(m => m.id === linkMem.id), 'Domain-only search matches via url ilike');
+assert(urlHitsDomain?.some((m) => m.id === linkMem.id), 'Domain-only search matches via url ilike');
 
 await client.from('memories').delete().eq('id', linkMem.id);
+
+// Complex URL containing commas, query strings, and hashes
+const complexUrl = 'https://example.com/search?q=foo,bar&category=news_items#section-2';
+const { data: complexMem, error: complexErr } = await client.from('memories').insert({
+  user_id: testUserId,
+  type: 'link',
+  url: complexUrl,
+  title: 'example.com',
+}).select().single();
+
+assert(!complexErr && complexMem, 'Complex URL with commas and query parameters inserted successfully');
+
+// Parameterized search for URL containing comma
+const escapedTarget = 'example.com/search?q=foo,bar'.replace(/[%_\\]/g, '\\$&');
+const { data: complexHits, error: complexQueryErr } = await client
+  .from('memories')
+  .select('id')
+  .ilike('url', `%${escapedTarget}%`);
+assert(
+  !complexQueryErr && complexHits?.some((m) => m.id === complexMem.id),
+  'URL containing comma in query string matches safely without PostgREST syntax error',
+);
+
+await client.from('memories').delete().eq('id', complexMem.id);
 
 // -------------------------------------------------------------
 // SECTION 3: CROSS-LANGUAGE & SEARCH PRECISION TESTS
@@ -248,6 +288,22 @@ assert(anonRows?.length === 0 || anonRows === null, 'Unauthenticated client cann
 const { data: publicUrlData } = userClient.storage.from('memories').getPublicUrl('nonexistent/file.pdf');
 const pubRes = await fetch(publicUrlData.publicUrl);
 assert(pubRes.status === 400 || pubRes.status === 404 || pubRes.status === 403, 'Direct unauthenticated access to storage bucket is denied (Bucket is private)');
+
+// -------------------------------------------------------------
+// SECTION 5: DEV SIGN-IN SCRIPT PRODUCTION KILL-SWITCH
+// -------------------------------------------------------------
+console.log('\n[SECTION 5] Dev Sign-In Script Production Kill-Switch');
+
+try {
+  const { execSync } = await import('node:child_process');
+  execSync('node scripts/dev-signin-link.mjs test@example.com', {
+    env: { ...process.env, NODE_ENV: 'production' },
+    stdio: 'pipe',
+  });
+  assert(false, 'dev-signin-link did not abort under NODE_ENV=production');
+} catch {
+  assert(true, 'dev-signin-link unconditionally aborts with error under NODE_ENV=production');
+}
 
 console.log('\n================================================================');
 console.log(`TEST RESULTS: ${passed} PASSED, ${failed} FAILED`);

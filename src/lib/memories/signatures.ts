@@ -87,6 +87,30 @@ function looksBinary(bytes: Uint8Array): boolean {
   return bytes.includes(0x00);
 }
 
+/**
+ * Verify whether a ZIP container is specifically an Office Open XML document (.docx).
+ * Inspects leading bytes (up to 4KB) for standard OPC package entry paths:
+ * `[Content_Types].xml` or `word/`.
+ */
+export function isDocxPackage(bytes: Uint8Array): boolean {
+  if (
+    !startsWith(bytes, [0x50, 0x4b, 0x03, 0x04]) &&
+    !startsWith(bytes, [0x50, 0x4b, 0x05, 0x06]) &&
+    !startsWith(bytes, [0x50, 0x4b, 0x07, 0x08])
+  ) {
+    return false;
+  }
+  let str = '';
+  const len = Math.min(bytes.length, 4096);
+  for (let i = 0; i < len; i++) {
+    const b = bytes[i];
+    if (b !== undefined) {
+      str += String.fromCharCode(b);
+    }
+  }
+  return str.includes('[Content_Types].xml') || str.includes('word/');
+}
+
 export interface SignatureCheck {
   ok: boolean;
   /** Human-language reason, when the signature contradicts the declared type. */
@@ -95,7 +119,8 @@ export interface SignatureCheck {
 
 /**
  * Verify that a file's real leading bytes are consistent with its declared MIME
- * type. Reads only the first {@link SNIFF_BYTES} bytes.
+ * type. Reads only the first {@link SNIFF_BYTES} bytes, except for container
+ * formats (DOCX) where up to 4KB are inspected for structural validity.
  *
  * - Binary types (images, pdf, docx, doc): the sniffed family MUST match.
  * - Text types (text/plain, text/markdown): no signature exists, so we only
@@ -110,6 +135,15 @@ export async function verifySignature(file: File, declaredType: string): Promise
     // A text file should not carry a known binary signature or NUL bytes.
     if (detectFamily(head) !== 'unknown' || looksBinary(head)) {
       return { ok: false, reason: "That file's contents don't match a text file." };
+    }
+    return { ok: true };
+  }
+
+  // Deep validation for Office Open XML (.docx): verify genuine OPC package structure
+  if (declaredType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+    const docxHead = new Uint8Array(await file.slice(0, 4096).arrayBuffer());
+    if (!isDocxPackage(docxHead)) {
+      return { ok: false, reason: "That file's contents don't match a Word document (.docx)." };
     }
     return { ok: true };
   }

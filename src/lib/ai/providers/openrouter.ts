@@ -240,7 +240,7 @@ export const openRouterProvider: AIService = {
     if (!trimmed) return query;
 
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 4000);
+    const timer = setTimeout(() => controller.abort(), 2500);
     try {
       const res = await fetch(`${baseUrl}/chat/completions`, {
         method: 'POST',

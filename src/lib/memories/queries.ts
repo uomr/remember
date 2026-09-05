@@ -235,12 +235,17 @@ async function semanticCandidateIds(
   supabase: ReturnType<typeof createClient>,
   query: string,
   limit: number,
+  hasDenseLexicalHits: boolean,
 ): Promise<string[]> {
   const ai = getAIService();
   if (!ai.enabled) return [];
 
+  const hasArabic = /[\u0600-\u06FF]/.test(query);
+
   let queryForEmbedding = query;
-  if (ai.expandQuery) {
+  // Adaptive: only expand cross-lingual intent if the query contains Arabic/non-Latin
+  // AND direct lexical matching was sparse or absent.
+  if (hasArabic && !hasDenseLexicalHits && ai.expandQuery) {
     try {
       queryForEmbedding = await ai.expandQuery({ query });
     } catch {
@@ -336,14 +341,32 @@ function shouldPerformSelectiveChunkSemanticSearch(
 }
 
 /**
- * Detect whether the query is a URL or domain pattern and return a clean pattern
- * for exact/substring URL search in PostgreSQL.
+ * Detect whether the query is a URL or domain pattern and return a clean,
+ * sanitized pattern for exact/substring URL search in PostgreSQL.
  */
-function extractUrlPattern(query: string): string | null {
+function extractUrlTarget(query: string): string | null {
   const trimmed = query.trim();
-  if (/^(https?:\/\/|www\.)/i.test(trimmed) || /^[a-zA-Z0-9-]+\.[a-zA-Z]{2,}(\/.*)?$/i.test(trimmed)) {
-    return trimmed.replace(/^https?:\/\//i, '').replace(/^www\./i, '').replace(/\/+$/, '');
+  if (!trimmed) return null;
+
+  // 1. Full URL or www prefix
+  if (/^(https?:\/\/|www\.)/i.test(trimmed)) {
+    const cleaned = trimmed.replace(/^https?:\/\//i, '').replace(/^www\./i, '').replace(/\/+$/, '');
+    return cleaned || null;
   }
+
+  // 2. Domain pattern (e.g. example.com, my-app.io/path?a=1)
+  if (/^[a-zA-Z0-9-]+\.[a-zA-Z]{2,}(\S*)?$/i.test(trimmed)) {
+    return trimmed.replace(/\/+$/, '');
+  }
+
+  // 3. Path or query component of a URL (e.g. /items/392, ?id=123, item?id=39201923)
+  if (
+    /^[/?#&][a-zA-Z0-9\-._~%!$&'()*+,;=:@/?#]+$/i.test(trimmed) ||
+    /^[a-zA-Z0-9\-._]+\?[a-zA-Z0-9\-._~%!$&'()*+,;=:@/?#]+$/i.test(trimmed)
+  ) {
+    return trimmed;
+  }
+
   return null;
 }
 
@@ -373,27 +396,37 @@ export async function searchMemories(
   const terms = tokenize(trimmed);
   const supabase = createClient();
 
-  // Deterministic literal URL / domain search pass
-  const urlPattern = extractUrlPattern(trimmed);
+  // Deterministic literal URL / domain search pass (parameterized, wildcards escaped)
+  const urlTarget = extractUrlTarget(trimmed);
   let urlMatchIds: string[] = [];
-  if (urlPattern) {
+  if (urlTarget) {
+    const escapedTarget = urlTarget.replace(/[%_\\]/g, '\\$&');
     const { data: urlData } = await supabase
       .from('memories')
       .select('id')
-      .ilike('url', `%${urlPattern}%`)
+      .ilike('url', `%${escapedTarget}%`)
       .limit(limit);
     if (urlData) {
       urlMatchIds = (urlData as { id: string }[]).map((r) => r.id);
     }
   }
 
-  const [rawLexicalIds, chunkIds, semanticIds] = await Promise.all([
+  // Lexical passes (ultra-fast <5ms)
+  const [rawLexicalIds, chunkIds] = await Promise.all([
     lexicalCandidateIds(supabase, filter, HYBRID_CANDIDATE_POOL),
     chunkLexicalCandidateIds(supabase, terms, HYBRID_CANDIDATE_POOL),
-    semanticCandidateIds(supabase, trimmed, HYBRID_CANDIDATE_POOL),
   ]);
 
   const lexicalIds = Array.from(new Set([...urlMatchIds, ...rawLexicalIds]));
+  const hasDenseLexicalHits = (rawLexicalIds.length + chunkIds.length) >= 2;
+
+  // Semantic pass (adaptively expands only if lexical hits are sparse)
+  const semanticIds = await semanticCandidateIds(
+    supabase,
+    trimmed,
+    HYBRID_CANDIDATE_POOL,
+    hasDenseLexicalHits,
+  );
 
   // Selective chunk semantic expansion (M2B):
   // Evaluates representative chunks of candidate documents only when lexical matches are sparse
