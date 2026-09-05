@@ -233,7 +233,11 @@ const userAId = 'bd07342f-440f-4860-83df-d21c4c0e205d';
 const fakeUserBId = '00000000-0000-0000-0000-000000000002';
 
 // 1. Verify foreign user memory creation restriction under RLS
-const anonKey = env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+const anonKey =
+  env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ||
+  env.NEXT_PUBLIC_SUPABASE_ANON_KEY ||
+  process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ||
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 const userClient = createClient(env.NEXT_PUBLIC_SUPABASE_URL, anonKey);
 
 // Without auth session, anon cannot select private memories
