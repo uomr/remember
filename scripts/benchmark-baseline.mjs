@@ -2,6 +2,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createClient } from '@supabase/supabase-js';
 
+if (typeof globalThis.WebSocket === 'undefined') {
+  globalThis.WebSocket = class {};
+}
+
 const envPath = path.resolve('.env.local');
 const envContent = fs.readFileSync(envPath, 'utf8');
 const env = {};
