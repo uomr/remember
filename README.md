@@ -46,12 +46,13 @@ Copy the example env file and fill in your Supabase values:
 cp .env.example .env.local
 ```
 
-| Variable                        | Scope         | Description                                                       |
-| ------------------------------- | ------------- | ----------------------------------------------------------------- |
-| `NEXT_PUBLIC_SUPABASE_URL`      | Public/client | Your Supabase project URL.                                        |
-| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Public/client | Supabase anon key (safe to expose; RLS protects data).           |
-| `SUPABASE_SERVICE_ROLE_KEY`     | **Server only** | Full-access key. **Never expose to the client.**                |
-| `AI_PROVIDER`                   | Server        | AI provider flag. Defaults to `disabled` in the MVP.              |
+| Variable                                | Scope           | Description                                                                 |
+| --------------------------------------- | --------------- | --------------------------------------------------------------------------- |
+| `NEXT_PUBLIC_SUPABASE_URL`              | Public/client   | Your Supabase project URL.                                                  |
+| `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`  | Public/client   | Supabase publishable key (safe to expose; legacy anon key also supported).  |
+| `SUPABASE_SECRET_KEY`                   | **Server only** | Supabase secret key (server-only; legacy service role key also supported).   |
+| `AI_PROVIDER`                           | Server          | AI provider flag (`disabled` or `openrouter`).                              |
+| `OPENROUTER_API_KEY`                    | **Server only** | Required if `AI_PROVIDER=openrouter`.                                       |
 
 ### 4. Set up the database
 

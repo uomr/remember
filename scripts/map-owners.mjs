@@ -27,7 +27,13 @@ const env = Object.fromEntries(
     }),
 );
 const APP_ORIGIN = 'http://localhost:3000';
-const admin = createClient(env.NEXT_PUBLIC_SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY, {
+const supaUrl = env.NEXT_PUBLIC_SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL;
+const supaSecret =
+  env.SUPABASE_SECRET_KEY ||
+  env.SUPABASE_SERVICE_ROLE_KEY ||
+  process.env.SUPABASE_SECRET_KEY ||
+  process.env.SUPABASE_SERVICE_ROLE_KEY;
+const admin = createClient(supaUrl, supaSecret, {
   auth: { persistSession: false },
 });
 

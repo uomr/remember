@@ -33,10 +33,14 @@ const env = Object.fromEntries(
     }),
 );
 
-const URL_ = env.NEXT_PUBLIC_SUPABASE_URL;
-const SERVICE = env.SUPABASE_SERVICE_ROLE_KEY;
+const URL_ = env.NEXT_PUBLIC_SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL;
+const SERVICE =
+  env.SUPABASE_SECRET_KEY ||
+  env.SUPABASE_SERVICE_ROLE_KEY ||
+  process.env.SUPABASE_SECRET_KEY ||
+  process.env.SUPABASE_SERVICE_ROLE_KEY;
 if (!URL_ || !SERVICE) {
-  console.error('Missing Supabase url / service role key in .env.local.');
+  console.error('Missing Supabase url / secret key in .env.local.');
   process.exit(1);
 }
 

@@ -31,14 +31,21 @@ const env = Object.fromEntries(
     }),
 );
 
-const SUPA_URL = env.NEXT_PUBLIC_SUPABASE_URL;
-const SERVICE = env.SUPABASE_SERVICE_ROLE_KEY;
-const OR_KEY = env.OPENROUTER_API_KEY;
-const MODEL = env.OPENROUTER_EMBEDDING_MODEL || 'openai/text-embedding-3-small';
+const SUPA_URL = env.NEXT_PUBLIC_SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL;
+const SERVICE =
+  env.SUPABASE_SECRET_KEY ||
+  env.SUPABASE_SERVICE_ROLE_KEY ||
+  process.env.SUPABASE_SECRET_KEY ||
+  process.env.SUPABASE_SERVICE_ROLE_KEY;
+const OR_KEY = env.OPENROUTER_API_KEY || process.env.OPENROUTER_API_KEY;
+const MODEL =
+  env.OPENROUTER_EMBEDDING_MODEL ||
+  process.env.OPENROUTER_EMBEDDING_MODEL ||
+  'openai/text-embedding-3-small';
 const ALL = process.argv.includes('--all');
 
 if (!SUPA_URL || !SERVICE) {
-  console.error('Missing Supabase url / service role key in .env.local.');
+  console.error('Missing Supabase url / secret key in .env.local.');
   process.exit(1);
 }
 if (!OR_KEY) {

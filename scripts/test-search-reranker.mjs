@@ -5,7 +5,9 @@ const { createClient } = await import('@supabase/supabase-js');
 const env = Object.fromEntries(readFileSync(new URL('../.env.local', import.meta.url), 'utf8')
   .split('\n').filter((line) => line.trim() && !line.trim().startsWith('#'))
   .map((line) => { const i = line.indexOf('='); return [line.slice(0, i).trim(), line.slice(i + 1).trim()]; }));
-const db = createClient(env.NEXT_PUBLIC_SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY,
+const serviceKey = env.SUPABASE_SECRET_KEY || env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
+const supaUrl = env.NEXT_PUBLIC_SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL;
+const db = createClient(supaUrl, serviceKey,
   { auth: { persistSession: false } });
 const { data, error } = await db.from('memories').select('id,type,title,text_content,url');
 if (error) throw error;

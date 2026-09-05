@@ -18,15 +18,17 @@ export function createClient() {
   const cookieStore = cookies();
 
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+  const publishableKey =
+    process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ||
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 
-  if (!url || !anonKey) {
+  if (!url || !publishableKey) {
     throw new Error(
-      'Missing NEXT_PUBLIC_SUPABASE_URL or NEXT_PUBLIC_SUPABASE_ANON_KEY. See .env.example.',
+      'Missing NEXT_PUBLIC_SUPABASE_URL or NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY (or legacy NEXT_PUBLIC_SUPABASE_ANON_KEY). See .env.example.',
     );
   }
 
-  return createServerClient(url, anonKey, {
+  return createServerClient(url, publishableKey, {
     cookies: {
       getAll() {
         return cookieStore.getAll();
@@ -46,21 +48,26 @@ export function createClient() {
 }
 
 /**
- * Privileged client using the SERVICE ROLE key. SERVER ONLY.
+ * Privileged client using the SECRET key. SERVER ONLY.
  * Bypasses RLS — use sparingly and never expose to the browser.
  *
+ * Supports SUPABASE_SECRET_KEY (current) and SUPABASE_SERVICE_ROLE_KEY (legacy).
  * TODO (Phase 1+): use only for narrowly-scoped admin tasks; prefer the
  * RLS-guarded client above for all user-scoped operations.
  */
 export function createServiceRoleClient() {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  const secretKey =
+    process.env.SUPABASE_SECRET_KEY ||
+    process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-  if (!url || !serviceRoleKey) {
-    throw new Error('Missing NEXT_PUBLIC_SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY (server only).');
+  if (!url || !secretKey) {
+    throw new Error(
+      'Missing NEXT_PUBLIC_SUPABASE_URL or SUPABASE_SECRET_KEY (or legacy SUPABASE_SERVICE_ROLE_KEY) (server only).',
+    );
   }
 
-  return createServerClient(url, serviceRoleKey, {
+  return createServerClient(url, secretKey, {
     cookies: {
       getAll() {
         return [];

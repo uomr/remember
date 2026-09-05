@@ -31,8 +31,12 @@ const env = Object.fromEntries(
     }),
 );
 
-const SUPA_URL = env.NEXT_PUBLIC_SUPABASE_URL;
-const SERVICE = env.SUPABASE_SERVICE_ROLE_KEY;
+const SUPA_URL = env.NEXT_PUBLIC_SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL;
+const SERVICE =
+  env.SUPABASE_SECRET_KEY ||
+  env.SUPABASE_SERVICE_ROLE_KEY ||
+  process.env.SUPABASE_SECRET_KEY ||
+  process.env.SUPABASE_SERVICE_ROLE_KEY;
 const APP_ORIGIN = process.env.APP_ORIGIN || 'http://localhost:3000';
 const email = process.argv[2];
 
@@ -41,7 +45,7 @@ if (!email) {
   process.exit(1);
 }
 if (!SUPA_URL || !SERVICE) {
-  console.error('Missing Supabase url / service role key in .env.local.');
+  console.error('Missing Supabase url / secret key in .env.local.');
   process.exit(1);
 }
 
