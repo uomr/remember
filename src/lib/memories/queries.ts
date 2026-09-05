@@ -239,9 +239,18 @@ async function semanticCandidateIds(
   const ai = getAIService();
   if (!ai.enabled) return [];
 
+  let queryForEmbedding = query;
+  if (ai.expandQuery) {
+    try {
+      queryForEmbedding = await ai.expandQuery({ query });
+    } catch {
+      queryForEmbedding = query;
+    }
+  }
+
   let vector: number[];
   try {
-    vector = await ai.embed({ text: query });
+    vector = await ai.embed({ text: queryForEmbedding });
   } catch {
     return [];
   }
@@ -327,6 +336,18 @@ function shouldPerformSelectiveChunkSemanticSearch(
 }
 
 /**
+ * Detect whether the query is a URL or domain pattern and return a clean pattern
+ * for exact/substring URL search in PostgreSQL.
+ */
+function extractUrlPattern(query: string): string | null {
+  const trimmed = query.trim();
+  if (/^(https?:\/\/|www\.)/i.test(trimmed) || /^[a-zA-Z0-9-]+\.[a-zA-Z]{2,}(\/.*)?$/i.test(trimmed)) {
+    return trimmed.replace(/^https?:\/\//i, '').replace(/^www\./i, '').replace(/\/+$/, '');
+  }
+  return null;
+}
+
+/**
  * Search the current user's memories — HYBRID (lexical + chunk + semantic).
  *
  * Recall strategies run in parallel and are fused with RRF:
@@ -352,11 +373,27 @@ export async function searchMemories(
   const terms = tokenize(trimmed);
   const supabase = createClient();
 
-  const [lexicalIds, chunkIds, semanticIds] = await Promise.all([
+  // Deterministic literal URL / domain search pass
+  const urlPattern = extractUrlPattern(trimmed);
+  let urlMatchIds: string[] = [];
+  if (urlPattern) {
+    const { data: urlData } = await supabase
+      .from('memories')
+      .select('id')
+      .ilike('url', `%${urlPattern}%`)
+      .limit(limit);
+    if (urlData) {
+      urlMatchIds = (urlData as { id: string }[]).map((r) => r.id);
+    }
+  }
+
+  const [rawLexicalIds, chunkIds, semanticIds] = await Promise.all([
     lexicalCandidateIds(supabase, filter, HYBRID_CANDIDATE_POOL),
     chunkLexicalCandidateIds(supabase, terms, HYBRID_CANDIDATE_POOL),
     semanticCandidateIds(supabase, trimmed, HYBRID_CANDIDATE_POOL),
   ]);
+
+  const lexicalIds = Array.from(new Set([...urlMatchIds, ...rawLexicalIds]));
 
   // Selective chunk semantic expansion (M2B):
   // Evaluates representative chunks of candidate documents only when lexical matches are sparse
@@ -395,8 +432,15 @@ export async function searchMemories(
     ? allLexicalIds.filter((id) => byId.has(id))
     : retrievedIds.filter((id) => byId.has(id));
 
+  // Prepend direct URL matches so literal URL searches are always deterministic and top-ranked
+  if (urlMatchIds.length > 0) {
+    const urlSet = new Set(urlMatchIds);
+    rankedIds = [...urlMatchIds, ...rankedIds.filter((id) => !urlSet.has(id))];
+  }
+
   const ai = getAIService();
-  if (ai.enabled && shouldCallReranker(allLexicalIds, retrievedIds)) {
+  const isUrlDirectHit = urlMatchIds.length > 0 && urlMatchIds.length <= 4;
+  if (ai.enabled && !isUrlDirectHit && shouldCallReranker(allLexicalIds, retrievedIds)) {
     try {
       const candidateIdsForJudge = retrievedIds.slice(0, RERANKER_MAX_CANDIDATES);
       const judged = await ai.rankSearch({

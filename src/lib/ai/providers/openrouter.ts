@@ -230,6 +230,56 @@ export const openRouterProvider: AIService = {
   },
 
   /**
+   * Fast bilingual/conceptual query expansion for semantic search.
+   * Bridges cross-language semantic retrieval (e.g. Arabic to English Socrates)
+   * while keeping similarity thresholds high enough to reject background noise.
+   */
+  async expandQuery({ query }: { query: string }): Promise<string> {
+    if (!apiKey) return query;
+    const trimmed = query.trim();
+    if (!trimmed) return query;
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 4000);
+    try {
+      const res = await fetch(`${baseUrl}/chat/completions`, {
+        method: 'POST',
+        signal: controller.signal,
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+          'HTTP-Referer': referer,
+          'X-Title': title,
+        },
+        body: JSON.stringify({
+          model,
+          temperature: 0,
+          messages: [
+            {
+              role: 'user',
+              content: `You are a search query expansion assistant for bilingual English/Arabic search.
+Given an Arabic query, output the original Arabic query followed by its primary English translations and key synonyms.
+Given an English query, output the original English query followed by its primary Arabic translations and key synonyms.
+Output only space-separated words, nothing else. No markdown, no punctuation.
+
+Query: ${trimmed}`,
+            },
+          ],
+        }),
+      });
+
+      if (!res.ok) return query;
+      const json = (await res.json()) as { choices?: { message?: { content?: string } }[] };
+      const raw = json.choices?.[0]?.message?.content?.trim();
+      return raw ? `${trimmed} ${raw}` : query;
+    } catch {
+      return query;
+    } finally {
+      clearTimeout(timer);
+    }
+  },
+
+  /**
    * Final intent-aware relevance judge. Embeddings retrieve broadly; this pass
    * reads the actual candidate descriptions and removes merely adjacent items.
    * It understands colloquial Arabic, synonyms and the user's requested

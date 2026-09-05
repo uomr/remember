@@ -70,6 +70,9 @@ export interface AIService {
   /** Produce a vector embedding for a piece of text. */
   embed(input: { text: string }): Promise<Embedding>;
 
+  /** Expand a cross-lingual or conceptual query for hybrid semantic matching. */
+  expandQuery?(input: { query: string }): Promise<string>;
+
   /** Select only truly relevant candidates and order them by intent match. */
   rankSearch(input: {
     query: string;

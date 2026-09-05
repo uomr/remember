@@ -13,6 +13,8 @@ export interface FileValidationResult {
   ok: boolean;
   /** Which memory kind this file maps to, when valid. */
   memoryType?: Extract<MemoryType, 'image' | 'document'>;
+  /** Resolved canonical MIME type, when valid. */
+  mimeType?: string;
   /** Human-language reason, when invalid. */
   reason?: string;
 }
@@ -28,21 +30,47 @@ function formatMb(bytes: number): string {
   return `${Math.round(bytes / (1024 * 1024))}MB`;
 }
 
+/**
+ * Resolve the effective MIME type from the file's declared type or its extension
+ * when browsers (e.g. Android / WhatsApp / file-pickers) omit the type or send
+ * generic octet-stream.
+ */
+export function resolveEffectiveMime(file: File): string {
+  const type = (file.type || '').trim().toLowerCase();
+  if (type && type !== 'application/octet-stream' && type !== 'binary/octet-stream') {
+    return type;
+  }
+
+  const name = file.name.toLowerCase();
+  if (name.endsWith('.pdf')) return 'application/pdf';
+  if (name.endsWith('.docx')) return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+  if (name.endsWith('.doc')) return 'application/msword';
+  if (name.endsWith('.txt')) return 'text/plain';
+  if (name.endsWith('.md')) return 'text/markdown';
+  if (name.endsWith('.jpg') || name.endsWith('.jpeg')) return 'image/jpeg';
+  if (name.endsWith('.png')) return 'image/png';
+  if (name.endsWith('.webp')) return 'image/webp';
+  if (name.endsWith('.gif')) return 'image/gif';
+  if (name.endsWith('.heic') || name.endsWith('.heif')) return 'image/heic';
+
+  return type;
+}
+
 export function validateUpload(file: File): FileValidationResult {
-  const type = file.type;
+  const type = resolveEffectiveMime(file);
 
   if ((allowedImageTypes as readonly string[]).includes(type)) {
     if (file.size > maxImageSize) {
       return { ok: false, reason: `Images must be ${formatMb(maxImageSize)} or smaller.` };
     }
-    return { ok: true, memoryType: 'image' };
+    return { ok: true, memoryType: 'image', mimeType: type };
   }
 
   if ((allowedDocumentTypes as readonly string[]).includes(type)) {
     if (file.size > maxDocumentSize) {
       return { ok: false, reason: `Documents must be ${formatMb(maxDocumentSize)} or smaller.` };
     }
-    return { ok: true, memoryType: 'document' };
+    return { ok: true, memoryType: 'document', mimeType: type };
   }
 
   return { ok: false, reason: "That file type isn't supported yet." };
@@ -57,7 +85,8 @@ export async function verifyUpload(file: File): Promise<FileValidationResult> {
   const basic = validateUpload(file);
   if (!basic.ok) return basic;
 
-  const signature = await verifySignature(file, file.type);
+  const targetType = basic.mimeType || file.type;
+  const signature = await verifySignature(file, targetType);
   if (!signature.ok) {
     return { ok: false, reason: signature.reason ?? "That file's contents don't match its type." };
   }

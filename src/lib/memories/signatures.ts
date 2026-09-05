@@ -36,6 +36,7 @@ const MIME_TO_FAMILY: Record<string, SignatureFamily> = {
   'image/webp': 'webp',
   'image/heic': 'heic',
   'application/pdf': 'pdf',
+  'application/x-pdf': 'pdf',
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'zip',
   'application/msword': 'ole',
 };

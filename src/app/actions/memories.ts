@@ -7,6 +7,7 @@ import { STORAGE_BUCKET, buildStoragePath } from '@/lib/config';
 import { normalizeUrl, safeFileName, verifyUpload } from '@/lib/memories/validation';
 import { listMemories, searchMemories, type MemoryPage } from '@/lib/memories/queries';
 import { track } from '@/lib/analytics';
+import { enrichDocumentMemory } from '@/app/actions/enrich';
 import type { MemoryType } from '@/types/database';
 
 /**
@@ -108,14 +109,18 @@ export async function createMemory(formData: FormData): Promise<ActionResult> {
     const memoryId = randomUUID();
     const fileName = safeFileName(file.name);
     const storagePath = buildStoragePath(user.id, memoryId, fileName);
+    const effectiveContentType = validation.mimeType || file.type || 'application/octet-stream';
 
     // 1) Upload bytes to the private bucket first. If this fails we never
     //    create a dangling DB row.
     const { error: uploadError } = await supabase.storage
       .from(STORAGE_BUCKET)
-      .upload(storagePath, file, { contentType: file.type, upsert: false });
+      .upload(storagePath, file, { contentType: effectiveContentType, upsert: false });
 
-    if (uploadError) return { ok: false, error: GENERIC_SAVE_ERROR };
+    if (uploadError) {
+      console.error('[save:uploadError]', uploadError.message);
+      return { ok: false, error: GENERIC_SAVE_ERROR };
+    }
 
     // 2) Create the memory row (explicit id so it matches the storage path).
     const { error: memoryError } = await supabase.from('memories').insert({
@@ -127,6 +132,7 @@ export async function createMemory(formData: FormData): Promise<ActionResult> {
     });
 
     if (memoryError) {
+      console.error('[save:memoryError]', memoryError.message);
       // Roll back the uploaded object so no orphaned file remains.
       await supabase.storage.from(STORAGE_BUCKET).remove([storagePath]);
       return { ok: false, error: GENERIC_SAVE_ERROR };
@@ -138,20 +144,30 @@ export async function createMemory(formData: FormData): Promise<ActionResult> {
       user_id: user.id,
       storage_path: storagePath,
       file_name: fileName,
-      file_type: file.type || null,
+      file_type: effectiveContentType,
       file_size: file.size,
     });
 
     if (fileError) {
+      console.error('[save:fileError]', fileError.message);
       await supabase.storage.from(STORAGE_BUCKET).remove([storagePath]);
       await supabase.from('memories').delete().eq('id', memoryId);
       return { ok: false, error: GENERIC_SAVE_ERROR };
     }
 
     track('memory_created', { memoryType: validation.memoryType });
+
+    // Background document text extraction (never blocks capture)
+    if (validation.memoryType === 'document') {
+      void enrichDocumentMemory(memoryId).catch((err) => {
+        console.error('[save:bgEnrichError]', err instanceof Error ? err.message : String(err));
+      });
+    }
+
     revalidatePath('/');
     return { ok: true, memoryId };
-  } catch {
+  } catch (error) {
+    console.error('[save:createMemory:error]', error instanceof Error ? error.message : String(error));
     return { ok: false, error: GENERIC_SAVE_ERROR };
   }
 }

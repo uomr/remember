@@ -40,6 +40,11 @@ const SERVICE =
 const APP_ORIGIN = process.env.APP_ORIGIN || 'http://localhost:3000';
 const email = process.argv[2];
 
+if (process.env.NODE_ENV === 'production' && !process.env.ALLOW_DEV_SIGNIN) {
+  console.error('dev-signin-link is disabled in production environments without ALLOW_DEV_SIGNIN=1.');
+  process.exit(1);
+}
+
 if (!email) {
   console.error('Usage: node scripts/dev-signin-link.mjs your-email@example.com');
   process.exit(1);

@@ -16,6 +16,7 @@ export const UPLOAD_LIMITS = {
   /** Allowed document MIME types. */
   allowedDocumentTypes: [
     'application/pdf',
+    'application/x-pdf',
     'text/plain',
     'text/markdown',
     'application/msword',

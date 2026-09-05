@@ -27,19 +27,12 @@ export function CaptureButton() {
   const [initialUrl, setInitialUrl] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
-  const [isMobile, setIsMobile] = useState(false);
   const [pending, startTransition] = useTransition();
   const formRef = useRef<HTMLFormElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     setMounted(true);
-    setIsMobile(window.innerWidth < 768);
-    function handleResize() {
-      setIsMobile(window.innerWidth < 768);
-    }
-    window.addEventListener('resize', handleResize);
-    return () => window.removeEventListener('resize', handleResize);
   }, []);
 
   function reset() {
@@ -335,7 +328,6 @@ export function CaptureButton() {
                           type="file"
                           required
                           accept={kind === 'image' ? 'image/*' : '.pdf,.txt,.md,.doc,.docx'}
-                          capture={kind === 'image' && isMobile ? 'environment' : undefined}
                           className="block w-full text-sm text-ink-muted file:mr-4 file:rounded-xl file:border-0 file:bg-accent-soft dark:file:bg-accent-soft-dark file:px-4 file:py-2 file:text-sm file:font-medium file:text-accent hover:file:bg-border"
                         />
                       </div>

@@ -28,7 +28,7 @@ export async function GET(request: NextRequest) {
   const origin = host ? `${proto}://${host}` : (request.nextUrl.origin || new URL(request.url).origin);
 
   // Only allow same-site relative redirects to avoid open-redirect abuse.
-  const safeNext = next && next.startsWith('/') && !next.startsWith('//') ? next : '/';
+  const safeNext = next && next.startsWith('/') && !next.startsWith('//') && !next.startsWith('/\\') ? next : '/';
 
   const supabase = createClient();
 
