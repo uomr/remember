@@ -238,6 +238,7 @@ export async function enrichDocumentMemory(memoryId: string): Promise<void> {
           content_hash: extracted.contentHash,
           parser_version: PARSER_VERSION,
           extraction_status: 'skipped',
+          extraction_error: 'Scanned document with no text layer (OCR required)',
           chunk_count: 0,
         } as Record<string, unknown>)
         .eq('id', memoryId);
@@ -272,8 +273,26 @@ export async function enrichDocumentMemory(memoryId: string): Promise<void> {
     // Storage discipline: do NOT store 50 pages into memories.text_content!
     // Store only the user note plus a brief preview (first ~500 chars).
     const userNote = (memory.text_content ?? '').trim();
-    const preview = extracted.rawText.slice(0, 500).trim();
-    const combinedPreview = userNote ? `${userNote}\n\n${preview}` : preview;
+    const rawPreview = extracted.rawText.slice(0, 500).trim();
+    let combinedPreview = userNote ? `${userNote}\n\n${rawPreview}` : rawPreview;
+
+    const ai = getAIService();
+
+    // AI Document Understanding: if AI is available, generate clean entities & summary
+    // to bridge raw PDF glyph artifacts and ensure immediate lexical hits on terms like "حوالة"
+    if (ai.enabled && ai.summarizeDocument) {
+      try {
+        const summary = await ai.summarizeDocument({
+          fileName: memory.file.file_name,
+          rawText: extracted.rawText,
+        });
+        if (summary) {
+          combinedPreview = userNote ? `${userNote}\n\n${summary}` : summary;
+        }
+      } catch (sumErr) {
+        console.warn('[enrich] document summary note (raw text preserved):', sumErr);
+      }
+    }
 
     const updatePayload: Record<string, unknown> = {
       text_content: combinedPreview || null,
@@ -284,6 +303,24 @@ export async function enrichDocumentMemory(memoryId: string): Promise<void> {
       extraction_status: 'done',
       extraction_error: null,
     };
+
+    // Semantic fingerprint for meaning-based hybrid search on documents:
+    if (ai.enabled) {
+      try {
+        const textToEmbed = [memory.file.file_name, combinedPreview, extracted.rawText.slice(0, 1500)]
+          .filter(Boolean)
+          .join('\n\n')
+          .slice(0, 4000);
+        if (textToEmbed.trim()) {
+          const vector = await ai.embed({ text: textToEmbed });
+          if (vector.length > 0) {
+            updatePayload.embedding = JSON.stringify(vector);
+          }
+        }
+      } catch (embedErr) {
+        console.warn('[enrich] document embedding warning (lexical search still works):', embedErr);
+      }
+    }
 
     const { error: updateError } = await supabase
       .from('memories')
@@ -309,5 +346,34 @@ export async function enrichDocumentMemory(memoryId: string): Promise<void> {
     } catch {
       // Ignore fallback error
     }
+  }
+}
+
+/**
+ * Retry or reprocess document extraction for a specific memory.
+ */
+export async function reprocessDocumentMemory(memoryId: string): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const supabase = createClient();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (!user) return { ok: false, error: 'Unauthorized' };
+
+    // Reset status to pending so UI reflects immediate progress
+    await supabase
+      .from('memories')
+      .update({ extraction_status: 'pending', extraction_error: null } as Record<string, unknown>)
+      .eq('id', memoryId);
+
+    revalidatePath('/');
+    revalidatePath(`/memory/${memoryId}`);
+
+    // Trigger background extraction
+    void enrichDocumentMemory(memoryId);
+
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : 'Reprocess failed' };
   }
 }

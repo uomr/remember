@@ -144,8 +144,22 @@ export function MemoryCard({
             {memory.title ?? memory.file?.file_name ?? 'Document'}
           </p>
 
-          {/* Extracted text snippet preview */}
-          {memory.text_content ? (
+          {/* Document extraction lifecycle status */}
+          {memory.extraction_status === 'pending' ? (
+            <div className="flex items-center gap-1.5 text-xs text-accent pt-0.5">
+              <span className="inline-block h-1.5 w-1.5 rounded-full bg-accent animate-pulse" />
+              <span>Processing document…</span>
+            </div>
+          ) : memory.extraction_status === 'skipped' ? (
+            <p className="text-xs text-ink-faint italic">
+              Scanned document (No text layer)
+            </p>
+          ) : memory.extraction_status === 'failed' ? (
+            <p className="text-xs text-rose-500/80">
+              Couldn&apos;t process document
+            </p>
+          ) : memory.text_content ? (
+            /* Extracted text snippet preview */
             <p dir="auto" className="line-clamp-2 text-sm text-ink-muted leading-relaxed">
               {memory.text_content}
             </p>

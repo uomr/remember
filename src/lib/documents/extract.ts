@@ -16,12 +16,82 @@ const HARD_MAX_CHARS = 500_000;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
+/**
+ * Universal Arabic normalizer for search and indexing.
+ * Ensures consistent matching across spelling variations, Presentation Forms,
+ * and regional character variants.
+ */
+export function normalizeArabicForSearch(text: string): string {
+  if (!text) return '';
+  return text
+    // 1. Unicode NFKC (decomposes presentation forms U+FB50-U+FDFF, U+FE70-U+FEFF into standard Arabic)
+    .normalize('NFKC')
+    // 2. Remove Arabic diacritics (Harakat / Tashkeel)
+    .replace(/[\u064B-\u065F\u0670]/g, '')
+    // 3. Remove Tatweel / Kashida
+    .replace(/\u0640/g, '')
+    // 4. Normalize Alef variants (أ, إ, آ, ٱ -> ا)
+    .replace(/[أإآٱ]/g, 'ا')
+    // 5. Normalize Taa Marbuta (ة -> ه)
+    .replace(/ة/g, 'ه')
+    // 6. Normalize Alef Maksura (ى -> ي)
+    .replace(/ى/g, 'ي')
+    // 7. Map common PDF font substitutions (dotless letters)
+    .replace(/\u066E/g, 'ت')
+    .replace(/\u06A1/g, 'ف')
+    .replace(/\u066F/g, 'ق')
+    // 8. Normalize Eastern Arabic & Persian numerals to standard digits (٠-٩ -> 0-9)
+    .replace(/[٠۰]/g, '0')
+    .replace(/[١۱]/g, '1')
+    .replace(/[٢۲]/g, '2')
+    .replace(/[٣۳]/g, '3')
+    .replace(/[٤۴]/g, '4')
+    .replace(/[٥۵]/g, '5')
+    .replace(/[٦۶]/g, '6')
+    .replace(/[٧۷]/g, '7')
+    .replace(/[٨۸]/g, '8')
+    .replace(/[٩۹]/g, '9');
+}
+
 export function normalizeExtractedText(raw: string): string {
-  return raw
+  // Always NFKC normalize first to convert Presentation Forms into standard Unicode
+  const nfkc = raw.normalize('NFKC');
+  return nfkc
     .replace(/\r\n/g, '\n')           // normalize line endings
     .replace(/[ \t]+/g, ' ')          // collapse horizontal whitespace
     .replace(/\n{3,}/g, '\n\n')       // collapse excessive blank lines
     .trim();
+}
+
+/**
+ * Augments extracted PDF text with normalized Arabic and reversed-word tokens
+ * so that both original visual glyphs and corrected semantic tokens match in FTS.
+ */
+export function augmentArabicPdfText(text: string): string {
+  if (!text) return '';
+  const hasArabic = /[\u0600-\u06FF\uFB50-\uFDFF\uFE70-\uFEFF]/.test(text);
+  if (!hasArabic) return text;
+
+  const norm = normalizeArabicForSearch(text);
+  const tokens = norm.split(/\s+/);
+  const extraTokens = new Set<string>();
+
+  for (const token of tokens) {
+    if (/[\u0600-\u06FF]/.test(token) && token.length > 2) {
+      // If token looks visually reversed (e.g. starts with 'ه' or ends with 'ال'):
+      const looksReversed = /^ه/.test(token) || /ال$/.test(token) || /لل$/.test(token);
+      if (looksReversed) {
+        const rev = Array.from(token).reverse().join('');
+        if (rev.length > 1) extraTokens.add(rev);
+      }
+      extraTokens.add(token);
+    }
+  }
+
+  if (extraTokens.size > 0) {
+    return `${text}\n\n${Array.from(extraTokens).join(' ')}`;
+  }
+  return text;
 }
 
 // ── Plain text (TXT / MD) ────────────────────────────────────────────────────
@@ -56,25 +126,26 @@ async function extractPdf(buffer: Buffer): Promise<{
           if (cleanedPage) {
             pages.push({
               pageNumber: typeof p.num === 'number' ? p.num : pages.length + 1,
-              text: cleanedPage,
+              text: augmentArabicPdfText(cleanedPage),
             });
           }
         }
       }
     }
 
-    const fullText = normalizeExtractedText(
-      typeof result === 'string' ? result : (result as { text?: string })?.text ?? pages.map((p) => p.text).join('\n\n'),
-    );
-    const truncated = fullText.length > HARD_MAX_CHARS;
+    const fullRaw = typeof result === 'string' ? result : (result as { text?: string })?.text ?? pages.map((p) => p.text).join('\n\n');
+    const cleanedFull = normalizeExtractedText(fullRaw);
+    const augmentedFull = augmentArabicPdfText(cleanedFull);
+    const truncated = augmentedFull.length > HARD_MAX_CHARS;
 
     return {
-      rawText: fullText.slice(0, HARD_MAX_CHARS),
+      rawText: augmentedFull.slice(0, HARD_MAX_CHARS),
       pages,
       pageCount: typeof result?.total === 'number' ? result.total : pages.length,
       truncated,
     };
-  } catch {
+  } catch (err) {
+    console.error('[extractPdf:error]', err instanceof Error ? err.message : String(err));
     return { rawText: '', pages: [], pageCount: 0, truncated: false };
   }
 }
@@ -91,7 +162,8 @@ async function extractDocx(buffer: Buffer): Promise<{ rawText: string; truncated
       rawText: text.slice(0, HARD_MAX_CHARS),
       truncated,
     };
-  } catch {
+  } catch (err) {
+    console.error('[extractDocx:error]', err instanceof Error ? err.message : String(err));
     return { rawText: '', truncated: false };
   }
 }

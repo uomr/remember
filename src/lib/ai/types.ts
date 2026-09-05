@@ -73,6 +73,9 @@ export interface AIService {
   /** Expand a cross-lingual or conceptual query for hybrid semantic matching. */
   expandQuery?(input: { query: string }): Promise<string>;
 
+  /** Clean, summarize, and extract key entities from raw document text. */
+  summarizeDocument?(input: { fileName: string; rawText: string }): Promise<string>;
+
   /** Select only truly relevant candidates and order them by intent match. */
   rankSearch(input: {
     query: string;

@@ -280,6 +280,65 @@ Query: ${trimmed}`,
   },
 
   /**
+   * Produce a clean, structured natural-language summary of raw document text.
+   * Bridges PDF glyph corruption, tables, and reverse-Arabic visual streams.
+   */
+  async summarizeDocument({
+    fileName,
+    rawText,
+  }: {
+    fileName: string;
+    rawText: string;
+  }): Promise<string> {
+    if (!apiKey) return '';
+    const trimmed = rawText.trim();
+    if (!trimmed) return '';
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 6000);
+    try {
+      const res = await fetch(`${baseUrl}/chat/completions`, {
+        method: 'POST',
+        signal: controller.signal,
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+          'HTTP-Referer': referer,
+          'X-Title': title,
+        },
+        body: JSON.stringify({
+          model,
+          temperature: 0.1,
+          max_tokens: 220,
+          messages: [
+            {
+              role: 'system',
+              content: `You are an expert document understanding engine for a personal memory app.
+Given extracted raw text from a document (which may have PDF glyph artifacts, reversed words, or bilingual tables), produce:
+1. Document Type / Concept in standard Arabic and English (e.g. سند تحويل / إيصال حوالة بنكية / Bank Transfer Receipt, فاتورة / Invoice, عقد / Contract).
+2. Key Entities: Parties, Accounts, Numbers, Amounts, Dates.
+3. Clean summary in natural Arabic and English.
+Keep it factual, concise (under 120 words), without conversational filler.`,
+            },
+            {
+              role: 'user',
+              content: `File name: ${fileName}\n\nRaw text:\n${trimmed.slice(0, 3500)}`,
+            },
+          ],
+        }),
+      });
+
+      if (!res.ok) return '';
+      const json = (await res.json()) as { choices?: { message?: { content?: string } }[] };
+      return json.choices?.[0]?.message?.content?.trim() ?? '';
+    } catch {
+      return '';
+    } finally {
+      clearTimeout(timer);
+    }
+  },
+
+  /**
    * Final intent-aware relevance judge. Embeddings retrieve broadly; this pass
    * reads the actual candidate descriptions and removes merely adjacent items.
    * It understands colloquial Arabic, synonyms and the user's requested

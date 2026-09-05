@@ -3,6 +3,7 @@ import 'server-only';
 import { createClient } from '@/lib/supabase/server';
 import { getAIService } from '@/lib/ai';
 import { selectiveChunkSemanticSearch } from '@/lib/documents/semantic';
+import { normalizeArabicForSearch } from '@/lib/documents/extract';
 import type { Memory, MemoryFile } from '@/types/database';
 
 /**
@@ -22,7 +23,8 @@ export interface MemoryWithFile extends Memory {
   fileUrl: string | null;
 }
 
-const MEMORY_COLUMNS = 'id, user_id, type, title, text_content, url, created_at, updated_at';
+const MEMORY_COLUMNS =
+  'id, user_id, type, title, text_content, url, extraction_status, extraction_error, chunk_count, created_at, updated_at';
 
 function resolveFirstFile(
   memoryId: string,
@@ -116,9 +118,14 @@ function buildSearchFilter(query: string): string | null {
 
   const tsQuery = terms.map((term) => `${term}:*`).join(' & ');
 
-  const perTerm = terms.map(
-    (term) => `or(${SUBSTRING_FIELDS.map((field) => `${field}.ilike.%${term}%`).join(',')})`,
-  );
+  const perTerm = terms.map((term) => {
+    const norm = normalizeArabicForSearch(term);
+    const variants = norm && norm !== term ? [term, norm] : [term];
+    const fieldConditions = variants.flatMap((v) =>
+      SUBSTRING_FIELDS.map((field) => `${field}.ilike.%${v}%`),
+    );
+    return `or(${fieldConditions.join(',')})`;
+  });
   const substringPass = perTerm.length === 1 ? perTerm[0] : `and(${perTerm.join(',')})`;
 
   return `search_vector.fts.${tsQuery},${substringPass}`;
@@ -186,7 +193,13 @@ async function chunkLexicalCandidateIds(
       .textSearch('search_vector', tsQuery, { config: 'simple' })
       .limit(limit);
 
-    const perTerm = terms.map((t) => `chunk_text.ilike.%${t}%`);
+    const perTerm = terms.map((t) => {
+      const norm = normalizeArabicForSearch(t);
+      if (norm && norm !== t) {
+        return `or(chunk_text.ilike.%${t}%,chunk_text.ilike.%${norm}%)`;
+      }
+      return `chunk_text.ilike.%${t}%`;
+    });
     const substringPass = (perTerm.length === 1 ? perTerm[0] : `and(${perTerm.join(',')})`) ?? '';
     const { data: subData, error: subError } = await supabase
       .from('memory_chunks')

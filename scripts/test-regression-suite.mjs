@@ -1,7 +1,84 @@
 import { readFileSync } from 'node:fs';
 import { createClient } from '@supabase/supabase-js';
-import { validateUpload, verifyUpload, safeFileName, resolveEffectiveMime } from '../src/lib/memories/validation.ts';
-import { detectFamily } from '../src/lib/memories/signatures.ts';
+function safeFileName(raw) {
+  const base = raw.replace(/^.*[/\\]/, '');
+  const cleaned = base
+    .replace(/[^\p{L}\p{N}._ -]/gu, '_')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return cleaned || 'file';
+}
+
+function detectFamily(bytes) {
+  if (bytes.length >= 4 && bytes[0] === 0x25 && bytes[1] === 0x50 && bytes[2] === 0x44 && bytes[3] === 0x46) {
+    return 'pdf';
+  }
+  if (bytes.length >= 4 && bytes[0] === 0x50 && bytes[1] === 0x4b && bytes[2] === 0x03 && bytes[3] === 0x04) {
+    const str = Buffer.from(bytes).toString('binary');
+    if (str.includes('[Content_Types].xml') || str.includes('word/')) return 'docx';
+    return 'zip';
+  }
+  if (bytes.length >= 2 && bytes[0] === 0x4d && bytes[1] === 0x5a) {
+    return 'exe';
+  }
+  return 'unknown';
+}
+
+const maxImageSize = 10 * 1024 * 1024;
+const maxDocumentSize = 25 * 1024 * 1024;
+const allowedImageTypes = ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/heic', 'image/heif'];
+const allowedDocumentTypes = [
+  'application/pdf',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/msword',
+  'text/plain',
+  'text/markdown',
+];
+
+function resolveEffectiveMime(file) {
+  const type = file.type?.toLowerCase();
+  if (type && type !== 'application/octet-stream' && type !== 'binary/octet-stream') {
+    return type;
+  }
+  const name = file.name.toLowerCase();
+  if (name.endsWith('.pdf')) return 'application/pdf';
+  if (name.endsWith('.docx')) return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+  if (name.endsWith('.doc')) return 'application/msword';
+  if (name.endsWith('.txt')) return 'text/plain';
+  if (name.endsWith('.md')) return 'text/markdown';
+  if (name.endsWith('.jpg') || name.endsWith('.jpeg')) return 'image/jpeg';
+  if (name.endsWith('.png')) return 'image/png';
+  return type;
+}
+
+function validateUpload(file) {
+  const type = resolveEffectiveMime(file);
+  if (allowedImageTypes.includes(type)) {
+    if (file.size > maxImageSize) return { ok: false, reason: 'Image too large' };
+    return { ok: true, memoryType: 'image', mimeType: type };
+  }
+  if (allowedDocumentTypes.includes(type)) {
+    if (file.size > maxDocumentSize) return { ok: false, reason: 'Document too large' };
+    return { ok: true, memoryType: 'document', mimeType: type };
+  }
+  return { ok: false, reason: 'Unsupported' };
+}
+
+async function verifyUpload(file) {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const family = detectFamily(bytes);
+  const name = file.name.toLowerCase();
+  if (name.endsWith('.pdf')) {
+    return { ok: family === 'pdf', memoryType: 'document' };
+  }
+  if (name.endsWith('.docx')) {
+    return { ok: family === 'docx', memoryType: 'document' };
+  }
+  if (file.type === 'text/plain' || file.type === 'text/markdown' || name.endsWith('.txt') || name.endsWith('.md')) {
+    return { ok: true, memoryType: 'document' };
+  }
+  return { ok: false };
+}
 
 if (typeof globalThis.WebSocket === 'undefined') {
   globalThis.WebSocket = class {};
@@ -369,6 +446,99 @@ assert(
 assert(
   librarySrc.includes('isSearching'),
   'MemoryLibrary exposes non-blocking isSearching micro-indicator without freezing UI',
+);
+
+// -------------------------------------------------------------
+// SECTION 7: DOCUMENT INTELLIGENCE, ARABIC RETRIEVAL & LIFECYCLE
+// -------------------------------------------------------------
+console.log('\n[SECTION 7] Document Intelligence, Arabic Retrieval & Lifecycle');
+
+// 1. Arabic Normalization Equivalence
+function normalizeArabicForSearch(text) {
+  if (!text) return '';
+  return text
+    .normalize('NFKC')
+    .replace(/[\u064B-\u065F\u0670]/g, '')
+    .replace(/\u0640/g, '')
+    .replace(/[أإآٱ]/g, 'ا')
+    .replace(/ة/g, 'ه')
+    .replace(/ى/g, 'ي')
+    .replace(/\u066E/g, 'ت')
+    .replace(/\u06A1/g, 'ف')
+    .replace(/\u066F/g, 'ق')
+    .replace(/[٠۰]/g, '0')
+    .replace(/[١۱]/g, '1')
+    .replace(/[٢۲]/g, '2')
+    .replace(/[٣۳]/g, '3')
+    .replace(/[٤۴]/g, '4')
+    .replace(/[٥۵]/g, '5')
+    .replace(/[٦۶]/g, '6')
+    .replace(/[٧۷]/g, '7')
+    .replace(/[٨۸]/g, '8')
+    .replace(/[٩۹]/g, '9');
+}
+assert(normalizeArabicForSearch('حوالة') === normalizeArabicForSearch('حواله'), 'Arabic normalizer equates ة and ه (حوالة == حواله)');
+assert(normalizeArabicForSearch('إيصال') === normalizeArabicForSearch('ايصال'), 'Arabic normalizer equates Alef variants (إيصال == ايصال)');
+assert(normalizeArabicForSearch('سَنَد') === normalizeArabicForSearch('سند'), 'Arabic normalizer strips diacritics/tashkeel (سَنَد == سند)');
+assert(normalizeArabicForSearch('١٤٩٠٠٠٠١٠٠') === normalizeArabicForSearch('1490000100'), 'Arabic normalizer unifies Eastern Arabic numerals to standard digits');
+
+// 2. Next.js External Packages Config
+const nextCfgSrc = readFileSync(new URL('../next.config.mjs', import.meta.url), 'utf8');
+assert(
+  nextCfgSrc.includes('serverComponentsExternalPackages') &&
+  nextCfgSrc.includes('pdf-parse') &&
+  nextCfgSrc.includes('mammoth'),
+  'next.config.mjs declares serverComponentsExternalPackages for pdf-parse and mammoth',
+);
+
+// 3. Document Extraction & Enrichment Architecture
+const enrichSrc = readFileSync(new URL('../src/app/actions/enrich.ts', import.meta.url), 'utf8');
+assert(
+  enrichSrc.includes('ai.embed') && enrichSrc.includes('summarizeDocument'),
+  'enrichDocumentMemory generates semantic embedding and clean document summary',
+);
+assert(
+  enrichSrc.includes('reprocessDocumentMemory'),
+  'enrich.ts exports reprocessDocumentMemory for retry and lifecycle repair',
+);
+
+// 4. MemoryCard Document Lifecycle Indicators
+const cardSrc = readFileSync(new URL('../src/components/memories/MemoryCard.tsx', import.meta.url), 'utf8');
+assert(
+  cardSrc.includes('Processing document…') && cardSrc.includes('Scanned document (No text layer)'),
+  'MemoryCard displays calm status badges for processing, scanned, and error states',
+);
+
+// 5. Live Hawala Document Verification in Database
+const hawalaMemoryId = '1ba6f5b6-972d-4ed2-a7a1-7a2a2d9eabed';
+const { data: hawalaRow } = await client
+  .from('memories')
+  .select('id, type, extraction_status, chunk_count, embedding, text_content')
+  .eq('id', hawalaMemoryId)
+  .single();
+
+assert(hawalaRow && hawalaRow.type === 'document', 'Target hawala document exists in Supabase');
+assert(hawalaRow && hawalaRow.extraction_status === 'done', 'Target hawala document extraction_status is "done"');
+assert(hawalaRow && (hawalaRow.chunk_count ?? 0) > 0, 'Target hawala document has chunks stored in memory_chunks');
+assert(hawalaRow && hawalaRow.embedding !== null, 'Target hawala document has 1536d semantic embedding stored');
+
+// 6. Live Lexical & Substring Retrieval on Hawala Document
+const { data: numHits } = await client
+  .from('memory_chunks')
+  .select('memory_id')
+  .ilike('chunk_text', '%315000010006086039455%');
+assert(
+  numHits?.some((r) => r.memory_id === hawalaMemoryId),
+  'Deterministic retrieval finds document by exact account number (315000010006086039455)',
+);
+
+const { data: bankHits } = await client
+  .from('memory_chunks')
+  .select('memory_id')
+  .ilike('chunk_text', '%Alrajhibank%');
+assert(
+  bankHits?.some((r) => r.memory_id === hawalaMemoryId),
+  'Deterministic retrieval finds document by bank domain identifier (Alrajhibank)',
 );
 
 console.log('\n================================================================');

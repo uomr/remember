@@ -17,6 +17,7 @@ const nextConfig = {
     serverActions: {
       bodySizeLimit: '25mb',
     },
+    serverComponentsExternalPackages: ['pdf-parse', 'mammoth'],
   },
 };
 
