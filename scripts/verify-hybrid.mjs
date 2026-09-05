@@ -55,7 +55,7 @@ const admin = createClient(SUPA_URL, SERVICE, { auth: { persistSession: false } 
 
 // --- mirror of the app's tuning + lexical predicate --------------------------
 const HYBRID_CANDIDATE_POOL = 100;
-const SEMANTIC_MIN_SIMILARITY = 0.1;
+const SEMANTIC_MIN_SIMILARITY = 0.3;
 const RRF_K = 60;
 const SUBSTRING_FIELDS = ['title', 'url', 'text_content'];
 

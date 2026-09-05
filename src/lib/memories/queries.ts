@@ -143,10 +143,11 @@ function buildSearchFilter(query: string): string | null {
 // How many candidates to pull from EACH recall strategy before fusing. Kept
 // comfortably larger than a page so "load more" has depth to page through.
 const HYBRID_CANDIDATE_POOL = 100;
-// Broad recall floor only: keep plausible candidates (even a colloquial query
-// such as "جزمة") for the intent-aware judge. This value does NOT decide what
-// the user sees; rankSearch performs the final precision filter below.
-const SEMANTIC_MIN_SIMILARITY = 0.1;
+// Semantic recall floor: In OpenAI text-embedding-3-small (1536 dimensions),
+// random/unrelated texts share a baseline similarity floor of ~0.15–0.28.
+// A floor of 0.30 cleanly rejects background cognitive noise while admitting
+// legitimate conceptual, paraphrased, and cross-lingual matches for the judge.
+const SEMANTIC_MIN_SIMILARITY = 0.3;
 // Reciprocal-rank-fusion constant (k). 60 is the value from the original RRF
 // paper; it blends the two ranked lists without letting either dominate.
 const RRF_K = 60;
@@ -296,11 +297,15 @@ function reciprocalRankFusion(lists: string[][]): string[] {
  */
 function shouldCallReranker(lexicalIds: string[], retrievedIds: string[]): boolean {
   if (retrievedIds.length === 0) return false;
-  if (retrievedIds.length <= 2) return false;
-  // All retrieved results are high-precision lexical matches → skip judge.
-  if (lexicalIds.length > 0 && lexicalIds.length === retrievedIds.length && lexicalIds.length <= 4) {
+  // If all retrieved candidates are high-precision exact lexical matches (<= 4),
+  // they already possess strong textual evidence; skip the judge to save latency and cost.
+  const lexicalSet = new Set(lexicalIds);
+  const allAreLexical = lexicalIds.length > 0 && retrievedIds.every((id) => lexicalSet.has(id));
+  if (allAreLexical && retrievedIds.length <= 4) {
     return false;
   }
+  // If ANY candidate is purely semantic (or sets are mixed/ambiguous), the judge
+  // MUST validate candidate intent to reject false positives.
   return true;
 }
 
