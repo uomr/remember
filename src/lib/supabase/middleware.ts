@@ -60,10 +60,15 @@ export async function updateSession(request: NextRequest): Promise<NextResponse>
     },
   });
 
-  // IMPORTANT: do not run code between createServerClient and getUser().
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+  // Safely attempt to fetch user; if the cookie is corrupted, tampered, or expired,
+  // fail closed gracefully (user = null) rather than crashing with an unhandled exception.
+  let user = null;
+  try {
+    const { data } = await supabase.auth.getUser();
+    user = data?.user ?? null;
+  } catch {
+    user = null;
+  }
 
   const { pathname } = request.nextUrl;
 

@@ -12,11 +12,20 @@ import { createClient } from '@/lib/supabase/server';
  * only). On any failure we bounce to /sign-in with a friendly, code-free error.
  */
 export async function GET(request: NextRequest) {
-  const { searchParams, origin } = new URL(request.url);
+  const { searchParams } = new URL(request.url);
   const code = searchParams.get('code');
   const tokenHash = searchParams.get('token_hash');
   const type = searchParams.get('type') as EmailOtpType | null;
   const next = searchParams.get('next');
+
+  // Derive the canonical request origin from the client-facing Host headers,
+  // falling back to request.nextUrl.origin or request.url only if missing.
+  // This guarantees that the user is redirected to the real public domain/IP
+  // and NEVER to internal localhost.
+  const forwardedHost = request.headers.get('x-forwarded-host');
+  const host = forwardedHost || request.headers.get('host');
+  const proto = request.headers.get('x-forwarded-proto') || (request.url.startsWith('https') ? 'https' : 'http');
+  const origin = host ? `${proto}://${host}` : (request.nextUrl.origin || new URL(request.url).origin);
 
   // Only allow same-site relative redirects to avoid open-redirect abuse.
   const safeNext = next && next.startsWith('/') && !next.startsWith('//') ? next : '/';
