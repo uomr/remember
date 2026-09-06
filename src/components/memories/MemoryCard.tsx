@@ -15,10 +15,18 @@ export function MemoryCard({
   memory,
   className = '',
   style,
+  searchContext,
+  onClick,
 }: {
   memory: MemoryWithFile;
   className?: string;
   style?: React.CSSProperties;
+  searchContext?: {
+    query: string;
+    position: number;
+    sessionId?: string;
+  };
+  onClick?: () => void;
 }) {
   const date = formatMemoryDate(memory.created_at);
 
@@ -29,10 +37,15 @@ export function MemoryCard({
         .split('/')[0]
     : '';
 
+  const href = searchContext?.query
+    ? `/memory/${memory.id}?fromQuery=${encodeURIComponent(searchContext.query)}&pos=${searchContext.position}&session=${encodeURIComponent(searchContext.sessionId || '')}`
+    : `/memory/${memory.id}`;
+
   return (
     <Link
-      href={`/memory/${memory.id}`}
+      href={href}
       style={style}
+      onClick={onClick}
       className={`group block overflow-hidden rounded-2xl border border-border bg-surface-raised shadow-soft transition-all duration-150 hover:border-border-strong hover:shadow-md active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ${className}`}
     >
       {/* ------------------------------------------------------------- */}

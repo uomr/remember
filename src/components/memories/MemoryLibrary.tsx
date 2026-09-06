@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef, useMemo, useTransition } from 'react';
 import type { MemoryWithFile } from '@/lib/memories/queries';
 import { loadMoreMemories } from '@/app/actions/memories';
+import { logRetrievalEventAction } from '@/app/actions/retrieval';
 import { SearchBar } from '@/components/search/SearchBar';
 import { FilterTabs, type FilterKind } from './FilterTabs';
 import { MemoryCard } from './MemoryCard';
@@ -26,6 +27,7 @@ interface MemoryLibraryProps {
  * - Instant 0ms clear back to recent memories without server roundtrips.
  * - Client-side URL synchronization (?q=) via replaceState without triggering RSC re-renders.
  * - Zero-friction category filtering tabs.
+ * - Non-invasive personal retrieval learning signals.
  */
 export function MemoryLibrary({
   initialMemories,
@@ -44,6 +46,11 @@ export function MemoryLibrary({
   const querySeq = useRef<number>(0);
   const abortController = useRef<AbortController | null>(null);
   const debounceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const sessionId = useRef<string>(
+    typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `sess_${Date.now()}`,
+  );
+  const lastSearchedQuery = useRef<string>('');
+  const prevQueriesRef = useRef<string[]>([]);
 
   // Sync state if server initialMemories update (e.g., after save/refresh)
   useEffect(() => {
@@ -85,6 +92,13 @@ export function MemoryLibrary({
     }
 
     setIsSearching(true);
+
+    if (lastSearchedQuery.current && lastSearchedQuery.current !== trimmed) {
+      if (!prevQueriesRef.current.includes(lastSearchedQuery.current)) {
+        prevQueriesRef.current.push(lastSearchedQuery.current);
+      }
+    }
+    lastSearchedQuery.current = trimmed;
 
     debounceTimer.current = setTimeout(async () => {
       const thisSeq = ++querySeq.current;
@@ -299,9 +313,32 @@ export function MemoryLibrary({
               </div>
             ) : (
               <ul className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                {visibleMemories.map((memory) => (
+                {visibleMemories.map((memory, index) => (
                   <li key={memory.id}>
-                    <MemoryCard memory={memory} />
+                    <MemoryCard
+                      memory={memory}
+                      searchContext={
+                        query.trim()
+                          ? {
+                              query: query.trim(),
+                              position: index + 1,
+                              sessionId: sessionId.current,
+                            }
+                          : undefined
+                      }
+                      onClick={() => {
+                        if (query.trim()) {
+                          void logRetrievalEventAction({
+                            memoryId: memory.id,
+                            rawQuery: query.trim(),
+                            eventType: 'search_result_open',
+                            position: index + 1,
+                            sessionId: sessionId.current,
+                            isReformulation: prevQueriesRef.current.length > 0,
+                          });
+                        }
+                      }}
+                    />
                   </li>
                 ))}
               </ul>

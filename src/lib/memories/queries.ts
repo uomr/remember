@@ -4,7 +4,11 @@ import { createClient } from '@/lib/supabase/server';
 import { getAIService } from '@/lib/ai';
 import { selectiveChunkSemanticSearch } from '@/lib/documents/semantic';
 import { normalizeArabicForSearch } from '@/lib/documents/extract';
-import { parseQueryIntent, type ParsedQuery } from '@/lib/memories/queryUnderstanding';
+import { parseQueryIntent, CONCEPT_MAP, type ParsedQuery } from '@/lib/memories/queryUnderstanding';
+import {
+  getPersonalRetrievalMatches,
+  type PersonalMatch,
+} from '@/lib/memories/personalRetrieval';
 import type { Memory, MemoryFile } from '@/types/database';
 
 /**
@@ -113,8 +117,8 @@ function tokenize(query: string): string[] {
  *
  * Returns null when the query has no searchable characters at all.
  */
-function buildSearchFilter(query: string): string | null {
-  const terms = tokenize(query);
+function buildSearchFilter(query: string, customTerms?: string[]): string | null {
+  const terms = customTerms && customTerms.length > 0 ? customTerms : tokenize(query);
   if (terms.length === 0) return null;
 
   const tsQuery = terms.map((term) => `${term}:*`).join(' & ');
@@ -400,7 +404,7 @@ async function intentCandidateIds(
     }
   }
 
-  for (const ex of intent.expandedTokens) {
+  for (const ex of intent.conceptExpansions) {
     if (ex.length >= 3) {
       orConditions.push(`text_content.ilike.%${ex}%`, `title.ilike.%${ex}%`);
     }
@@ -444,7 +448,7 @@ async function chunkIntentCandidateIds(
     }
   }
 
-  for (const ex of intent.expandedTokens) {
+  for (const ex of intent.conceptExpansions) {
     if (ex.length >= 3) {
       orConditions.push(`chunk_text.ilike.%${ex}%`);
     }
@@ -480,15 +484,19 @@ function rankCandidatesByCompoundIntent(
   intent: ParsedQuery,
   terms: string[],
   chunksByMemoryId: Map<string, string[]>,
+  personalMatches?: Map<string, PersonalMatch>,
 ): string[] {
   const scored: { id: string; score: number }[] = [];
 
   for (const mem of candidates) {
-    const fullText = normalizeArabicForSearch(`${mem.title || ''} ${mem.text_content || ''}`);
+    const memTitleNorm = normalizeArabicForSearch(mem.title || '').toLowerCase();
+    const memBodyNorm = normalizeArabicForSearch(mem.text_content || '').toLowerCase();
+    const fileNames = (mem.memory_files || []).map((f) => normalizeArabicForSearch(f.file_name).toLowerCase()).join(' ');
     const chunkTexts = (chunksByMemoryId.get(mem.id) || [])
       .map(normalizeArabicForSearch)
-      .join(' ');
-    const combined = `${fullText} ${chunkTexts}`.toLowerCase();
+      .join(' ')
+      .toLowerCase();
+    const combined = `${memTitleNorm} ${memBodyNorm} ${fileNames} ${chunkTexts}`;
 
     // 1. Numeric Match (standalone boundary — prevents matching account number slices)
     let matchedNumber = false;
@@ -503,7 +511,7 @@ function rankCandidatesByCompoundIntent(
       });
     }
 
-    // 2. Month Match (contextual or word boundary)
+    // 2. Month Match (contextual regex or explicit name)
     let matchedMonth = false;
     if (intent.months.length > 0) {
       matchedMonth = intent.months.some((m) => {
@@ -516,12 +524,16 @@ function rankCandidatesByCompoundIntent(
       });
     }
 
-    // 3. Concept Match
-    let matchedConcept = false;
-    if (intent.concepts.length > 0) {
-      matchedConcept = intent.expandedTokens.some((ex) => {
-        return combined.includes(normalizeArabicForSearch(ex).toLowerCase());
-      });
+    // 3. Concept Match - Per-concept tracking
+    const matchedConcepts = new Set<string>();
+    for (const cKey of intent.concepts) {
+      const cObj = CONCEPT_MAP.find((c) => c.key === cKey);
+      if (cObj) {
+        const hasConceptInMem = cObj.expansions.some((ex) =>
+          combined.includes(normalizeArabicForSearch(ex).toLowerCase()),
+        );
+        if (hasConceptInMem) matchedConcepts.add(cKey);
+      }
     }
 
     // 4. Keyword Match
@@ -532,19 +544,55 @@ function rankCandidatesByCompoundIntent(
       }
     }
 
+    // 5. Title & Filename Direct Relevance Boosts
+    let titleBoost = 0;
+    for (const t of terms) {
+      if (memTitleNorm.includes(normalizeArabicForSearch(t).toLowerCase())) titleBoost += 120;
+    }
+    for (const cKey of intent.concepts) {
+      const cObj = CONCEPT_MAP.find((c) => c.key === cKey);
+      if (cObj && cObj.expansions.some((ex) => memTitleNorm.includes(normalizeArabicForSearch(ex).toLowerCase()))) {
+        titleBoost += 100;
+      }
+    }
+    if (intent.months.length > 0) {
+      const monthInTitle = intent.months.some((m) => memTitleNorm.includes(m.toLowerCase()));
+      if (monthInTitle) titleBoost += 100;
+    }
+
+    // 6. Type Affinity Bonus
+    let typeScore = 0;
+    if (intent.typeHint && mem.type === intent.typeHint) {
+      typeScore = 50;
+    }
+
+    // 7. Personal Retrieval Memory Boost
+    let personalBoost = 0;
+    if (personalMatches && personalMatches.has(mem.id)) {
+      const pMatch = personalMatches.get(mem.id)!;
+      personalBoost = Math.round(pMatch.effectiveWeight * 180);
+    }
+
     // Negative constraints:
     // If query has explicit number requirement, and candidate does NOT match number:
     if (intent.numbers.length > 0 && !matchedNumber) {
-      continue; // Filter out completely
+      continue;
     }
 
     // If query has explicit month requirement, and candidate does NOT match month:
     if (intent.months.length > 0 && !matchedMonth) {
-      continue; // Filter out completely
+      continue;
     }
 
-    // If candidate matches neither numbers, months, concepts, nor keywords:
-    if (!matchedNumber && !matchedMonth && !matchedConcept && matchedKeywords === 0) {
+    // If candidate matches neither numbers, months, concepts, keywords, title, nor personal associations:
+    if (
+      !matchedNumber &&
+      !matchedMonth &&
+      matchedConcepts.size === 0 &&
+      matchedKeywords === 0 &&
+      titleBoost === 0 &&
+      personalBoost === 0
+    ) {
       continue;
     }
 
@@ -552,8 +600,14 @@ function rankCandidatesByCompoundIntent(
     let score = 0;
     if (matchedNumber) score += 120;
     if (matchedMonth) score += 100;
-    if (matchedConcept) score += 80;
-    score += matchedKeywords * 30;
+    score += matchedConcepts.size * 90;
+    score += matchedKeywords * 35;
+    score += titleBoost;
+    score += typeScore;
+    score += personalBoost;
+
+    // Multi-concept synergy bonus
+    if (matchedConcepts.size >= 2) score += 150;
 
     // Multidimensional synergy bonus:
     const queryDims =
@@ -561,7 +615,7 @@ function rankCandidatesByCompoundIntent(
       (intent.months.length > 0 ? 1 : 0) +
       (intent.concepts.length > 0 ? 1 : 0);
     const matchedDims =
-      (matchedNumber ? 1 : 0) + (matchedMonth ? 1 : 0) + (matchedConcept ? 1 : 0);
+      (matchedNumber ? 1 : 0) + (matchedMonth ? 1 : 0) + (matchedConcepts.size > 0 ? 1 : 0);
 
     if (queryDims >= 3 && matchedDims >= 3) score += 400;
     else if (queryDims >= 2 && matchedDims >= 2) score += 200;
@@ -607,8 +661,8 @@ export async function searchMemoriesFast(
   }
 
   const intent = parseQueryIntent(trimmed);
-  const filter = buildSearchFilter(trimmed);
-  const terms = tokenize(trimmed);
+  const terms = intent.coreTerms.length > 0 ? intent.coreTerms : tokenize(trimmed);
+  const filter = buildSearchFilter(trimmed, terms);
   const supabase = createClient();
 
   // 1. Literal URL / domain search pass (parameterized, wildcards escaped)
@@ -626,23 +680,27 @@ export async function searchMemoriesFast(
     }
   }
 
-  // 2. Parallel Candidate Recall: Direct Lexical + Structured Intent
+  // 2. Parallel Candidate Recall: Direct Lexical + Structured Intent + Personal Retrieval
   const recallPromises: [
     Promise<string[]>,
     Promise<string[]>,
     Promise<string[]>,
     Promise<string[]>,
+    Promise<{ matches: Map<string, PersonalMatch>; candidateIds: string[] }>,
   ] = [
     filter ? lexicalCandidateIds(supabase, filter, HYBRID_CANDIDATE_POOL) : Promise.resolve([]),
     terms.length > 0 ? chunkLexicalCandidateIds(supabase, terms, HYBRID_CANDIDATE_POOL) : Promise.resolve([]),
     intent.hasStructuredIntent ? intentCandidateIds(supabase, intent, HYBRID_CANDIDATE_POOL) : Promise.resolve([]),
     intent.hasStructuredIntent ? chunkIntentCandidateIds(supabase, intent, HYBRID_CANDIDATE_POOL) : Promise.resolve([]),
+    getPersonalRetrievalMatches(supabase, trimmed),
   ];
 
-  const [rawLexicalIds, chunkIds, intentIds, chunkIntentIds] = await Promise.all(recallPromises);
+  const [rawLexicalIds, chunkIds, intentIds, chunkIntentIds, personalRecall] = await Promise.all(recallPromises);
+  const personalMatches = personalRecall.matches;
+  const personalCandidateIds = personalRecall.candidateIds;
 
   const allCandidateIds = Array.from(
-    new Set([...urlMatchIds, ...rawLexicalIds, ...chunkIds, ...intentIds, ...chunkIntentIds]),
+    new Set([...urlMatchIds, ...rawLexicalIds, ...chunkIds, ...intentIds, ...chunkIntentIds, ...personalCandidateIds]),
   );
 
   if (allCandidateIds.length === 0) {
@@ -683,10 +741,10 @@ export async function searchMemoriesFast(
     // Best-effort: chunk texts are optional for scoring
   }
 
-  // Rank candidates using compound intent and negative constraints
+  // Rank candidates using compound intent, negative constraints, and personal retrieval
   let rankedIds: string[] = [];
-  if (intent.hasStructuredIntent) {
-    rankedIds = rankCandidatesByCompoundIntent(candidateRows, intent, terms, chunksByMemoryId);
+  if (intent.hasStructuredIntent || personalMatches.size > 0) {
+    rankedIds = rankCandidatesByCompoundIntent(candidateRows, intent, terms, chunksByMemoryId, personalMatches);
     if (urlMatchIds.length > 0) {
       const urlSet = new Set(urlMatchIds);
       rankedIds = [...urlMatchIds, ...rankedIds.filter((id) => !urlSet.has(id))];
@@ -722,7 +780,7 @@ export async function searchMemoriesFast(
 }
 
 /**
- * Tier 2 Search: Semantic + Cross-lingual + AI Reranker.
+ * Tier 2 Search: Semantic + Cross-lingual + Personal Retrieval + AI Reranker.
  * Runs in background or when Tier 1 results are sparse (< 2) or query is non-Latin/conceptual.
  */
 export async function searchMemoriesDeep(
@@ -737,13 +795,11 @@ export async function searchMemoriesDeep(
   const supabase = createClient();
   const hasDenseLexicalHits = fastIds.length >= 2;
 
-  // Semantic pass (adaptively expands query if Arabic/non-Latin and lexical hits are sparse)
-  const semanticIds = await semanticCandidateIds(
-    supabase,
-    trimmed,
-    HYBRID_CANDIDATE_POOL,
-    hasDenseLexicalHits,
-  );
+  // Semantic pass and personal retrieval in parallel
+  const [semanticIds, personalRecall] = await Promise.all([
+    semanticCandidateIds(supabase, trimmed, HYBRID_CANDIDATE_POOL, hasDenseLexicalHits),
+    getPersonalRetrievalMatches(supabase, trimmed),
+  ]);
 
   // Selective chunk semantic expansion for conceptual queries
   let chunkSemanticIds: string[] = [];
@@ -761,7 +817,12 @@ export async function searchMemoriesDeep(
   }
 
   const allChunkIds = Array.from(new Set(chunkSemanticIds));
-  const retrievedIds = reciprocalRankFusion([fastIds, allChunkIds, semanticIds]);
+  const retrievedIds = reciprocalRankFusion([
+    fastIds,
+    allChunkIds,
+    semanticIds,
+    personalRecall.candidateIds,
+  ]);
   if (retrievedIds.length === 0) return { memories: [], hasMore: false };
 
   const { data, error } = await supabase

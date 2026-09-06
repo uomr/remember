@@ -45,4 +45,6 @@ pnpm-debug.log*
 tsc-check.txt
 tsc-out.txt
 tsc-status.txt
+IDEA/
+.postman/
 

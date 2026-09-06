@@ -1,8 +1,10 @@
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { getMemory } from '@/lib/memories/queries';
+import { recordRetrievalEvent } from '@/lib/memories/personalRetrieval';
 import { DeleteMemoryButton } from '@/components/memories/DeleteMemoryButton';
 import { formatFileSize, formatMemoryDate } from '@/lib/format';
+import { ThemeToggle } from '@/components/ui/ThemeToggle';
 
 /**
  * Memory detail. Shows the original content (image, document link, saved link,
@@ -11,11 +13,29 @@ import { formatFileSize, formatMemoryDate } from '@/lib/format';
  */
 export const dynamic = 'force-dynamic';
 
-import { ThemeToggle } from '@/components/ui/ThemeToggle';
+interface MemoryPageProps {
+  params: { id: string };
+  searchParams?: {
+    fromQuery?: string;
+    pos?: string;
+    session?: string;
+  };
+}
 
-export default async function MemoryPage({ params }: { params: { id: string } }) {
+export default async function MemoryPage({ params, searchParams }: MemoryPageProps) {
   const memory = await getMemory(params.id);
   if (!memory) notFound();
+
+  // If arriving from an active search query, record confirmed recovery
+  if (searchParams?.fromQuery) {
+    void recordRetrievalEvent({
+      memoryId: params.id,
+      rawQuery: searchParams.fromQuery,
+      eventType: 'confirmed_recovery',
+      position: searchParams.pos ? parseInt(searchParams.pos, 10) : undefined,
+      sessionId: searchParams.session,
+    }).catch(() => {});
+  }
 
   const date = formatMemoryDate(memory.created_at);
 
