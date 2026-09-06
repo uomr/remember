@@ -53,16 +53,16 @@ export interface AIService {
   readonly enabled: boolean;
 
   /** Extract text from an image (OCR). */
-  ocr(input: { fileUrl: string }): Promise<OcrResult>;
+  ocr(input: { fileUrl?: string; buffer?: Buffer; mimeType?: string }): Promise<OcrResult>;
 
   /** Produce a short natural-language description of an image. */
-  describeImage(input: { fileUrl: string }): Promise<ImageDescription>;
+  describeImage(input: { fileUrl?: string; buffer?: Buffer; mimeType?: string }): Promise<ImageDescription>;
 
   /**
-   * OCR + describe in one call (fetches the image ONCE, runs both prompts).
+   * OCR + describe in one call (fetches or accepts the image ONCE, runs both prompts).
    * Prefer this over calling ocr() + describeImage() separately when both are needed.
    */
-  ocrAndDescribeImage(input: { fileUrl: string }): Promise<ImageAnalysis>;
+  ocrAndDescribeImage(input: { fileUrl?: string; buffer?: Buffer; mimeType?: string }): Promise<ImageAnalysis>;
 
   /** Extract text content from a document (PDF, docx, etc.). */
   extractText(input: { fileUrl: string }): Promise<ExtractedText>;

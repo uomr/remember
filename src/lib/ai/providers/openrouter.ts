@@ -104,17 +104,42 @@ async function askAboutImageData(
 }
 
 /**
- * Ask a vision model about an image URL. Fetches the bytes once and calls
+ * Resolve an image input (either a buffer or an absolute URL) into a data URL.
+ */
+async function resolveImageDataUrl(
+  input: { fileUrl?: string; buffer?: Buffer; mimeType?: string },
+  signal: AbortSignal,
+): Promise<string> {
+  if (input.buffer) {
+    const mime = input.mimeType || 'image/jpeg';
+    return `data:${mime};base64,${input.buffer.toString('base64')}`;
+  }
+  if (input.fileUrl) {
+    if (!input.fileUrl.startsWith('http://') && !input.fileUrl.startsWith('https://')) {
+      throw new Error(
+        `Invalid image URL for vision model: "${input.fileUrl}". Expected absolute HTTP/HTTPS URL or buffer.`,
+      );
+    }
+    return toDataUrl(input.fileUrl, signal);
+  }
+  throw new Error('Neither buffer nor fileUrl provided for vision analysis.');
+}
+
+/**
+ * Ask a vision model about an image. Fetches the bytes once and calls
  * the completion under one shared timeout so a slow step never hangs.
  * Prefer `askAboutImageData` directly when multiple prompts share the same image.
  */
-async function askAboutImage(fileUrl: string, prompt: string): Promise<string> {
+async function askAboutImage(
+  input: { fileUrl?: string; buffer?: Buffer; mimeType?: string },
+  prompt: string,
+): Promise<string> {
   if (!apiKey) throw new Error('OpenRouter API key is not configured.');
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const dataUrl = await toDataUrl(fileUrl, controller.signal);
+    const dataUrl = await resolveImageDataUrl(input, controller.signal);
     return await askAboutImageData(dataUrl, prompt, controller.signal);
   } finally {
     clearTimeout(timer);
@@ -144,27 +169,27 @@ export const openRouterProvider: AIService = {
    * When both OCR and description are needed for the same image, use enrichImageMemory
    * which fetches the image once and calls both passes via askAboutImageData.
    */
-  async ocr({ fileUrl }): Promise<OcrResult> {
-    const text = await askAboutImage(fileUrl, OCR_PROMPT);
+  async ocr(input: { fileUrl?: string; buffer?: Buffer; mimeType?: string }): Promise<OcrResult> {
+    const text = await askAboutImage(input, OCR_PROMPT);
     return { text };
   },
 
-  async describeImage({ fileUrl }): Promise<ImageDescription> {
-    const description = await askAboutImage(fileUrl, DESCRIBE_PROMPT);
+  async describeImage(input: { fileUrl?: string; buffer?: Buffer; mimeType?: string }): Promise<ImageDescription> {
+    const description = await askAboutImage(input, DESCRIBE_PROMPT);
     return { description };
   },
 
   /**
-   * Fetch the image exactly ONCE and run both OCR and describe passes in parallel.
+   * Fetch/prepare the image exactly ONCE and run both OCR and describe passes in parallel.
    * This halves bandwidth and eliminates the race condition where the signed URL
    * expires between the two sequential calls (fixes G2 / P4 from audit).
    */
-  async ocrAndDescribeImage({ fileUrl }): Promise<ImageAnalysis> {
+  async ocrAndDescribeImage(input: { fileUrl?: string; buffer?: Buffer; mimeType?: string }): Promise<ImageAnalysis> {
     if (!apiKey) throw new Error('OpenRouter API key is not configured.');
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs * 2); // two model calls share one budget
     try {
-      const dataUrl = await toDataUrl(fileUrl, controller.signal);
+      const dataUrl = await resolveImageDataUrl(input, controller.signal);
       const [descResult, ocrResult] = await Promise.allSettled([
         askAboutImageData(dataUrl, DESCRIBE_PROMPT, controller.signal),
         askAboutImageData(dataUrl, OCR_PROMPT, controller.signal),

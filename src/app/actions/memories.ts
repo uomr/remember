@@ -7,7 +7,7 @@ import { STORAGE_BUCKET, buildStoragePath } from '@/lib/config';
 import { normalizeUrl, safeFileName, verifyUpload } from '@/lib/memories/validation';
 import { listMemories, searchMemories, type MemoryPage } from '@/lib/memories/queries';
 import { track } from '@/lib/analytics';
-import { enrichDocumentMemory } from '@/app/actions/enrich';
+import { enrichDocumentMemory, enrichImageMemory } from '@/app/actions/enrich';
 import type { MemoryType } from '@/types/database';
 
 /**
@@ -129,7 +129,10 @@ export async function createMemory(formData: FormData): Promise<ActionResult> {
       type: validation.memoryType,
       title: fileName,
       text_content: note || null,
-      extraction_status: validation.memoryType === 'document' ? 'pending' : null,
+      extraction_status:
+        validation.memoryType === 'document' || validation.memoryType === 'image'
+          ? 'pending'
+          : null,
     });
 
     if (memoryError) {
@@ -158,10 +161,14 @@ export async function createMemory(formData: FormData): Promise<ActionResult> {
 
     track('memory_created', { memoryType: validation.memoryType });
 
-    // Background document text extraction (never blocks capture)
+    // Background enrichment (never blocks capture)
     if (validation.memoryType === 'document') {
       void enrichDocumentMemory(memoryId).catch((err) => {
-        console.error('[save:bgEnrichError]', err instanceof Error ? err.message : String(err));
+        console.error('[save:bgDocEnrichError]', err instanceof Error ? err.message : String(err));
+      });
+    } else if (validation.memoryType === 'image') {
+      void enrichImageMemory(memoryId).catch((err) => {
+        console.error('[save:bgImageEnrichError]', err instanceof Error ? err.message : String(err));
       });
     }
 

@@ -21,67 +21,141 @@ import { STORAGE_BUCKET } from '@/lib/config';
  * copy (fixes G2 / P4 — eliminates the double network fetch).
  */
 export async function enrichImageMemory(memoryId: string): Promise<void> {
+  const supabase = createClient();
   try {
     const ai = getAIService();
-    if (!ai.enabled) return; // disabled/unconfigured → no-op, no cost.
+    if (!ai.enabled) {
+      await supabase
+        .from('memories')
+        .update({
+          extraction_status: 'skipped',
+          extraction_error: 'AI service is disabled (AI_PROVIDER=disabled)',
+        } as Record<string, unknown>)
+        .eq('id', memoryId);
+      return;
+    }
 
-    const supabase = createClient();
     const {
       data: { user },
     } = await supabase.auth.getUser();
     if (!user) return;
 
-    // RLS-guarded read; also mints a short-lived signed URL the model can fetch.
+    // RLS-guarded read
     const memory = await getMemory(memoryId);
-    if (!memory || memory.type !== 'image' || !memory.fileUrl) return;
+    if (!memory || memory.type !== 'image') return;
+    if (!memory.file) {
+      console.error('[enrich:image] no file attached to memory:', memoryId);
+      await supabase
+        .from('memories')
+        .update({
+          extraction_status: 'failed',
+          extraction_error: 'No attached file found for image memory',
+        } as Record<string, unknown>)
+        .eq('id', memoryId);
+      return;
+    }
 
-    // Idempotency check: if this memory was already fully enriched, skip.
-    // "Fully enriched" means both a description/OCR text and an embedding exist.
-    // This prevents duplicate AI calls when the action is fired more than once
-    // (e.g. CaptureButton + /share firing in the same session).
-    if (memory.text_content && memory.embedding) {
+    // Idempotency check: if this memory was already fully enriched with description, embedding and marked done
+    if (memory.text_content && memory.embedding && memory.extraction_status === 'done') {
       console.info('[enrich] image already enriched, skipping:', memoryId);
       return;
     }
 
+    // Explicit lifecycle state: pending
+    await supabase
+      .from('memories')
+      .update({ extraction_status: 'pending' } as Record<string, unknown>)
+      .eq('id', memoryId);
+
+    // Download original bytes directly from private Supabase Storage on the server
+    const { data: fileData, error: downloadError } = await supabase.storage
+      .from(STORAGE_BUCKET)
+      .download(memory.file.storage_path);
+
+    if (downloadError || !fileData) {
+      const errMsg = downloadError?.message || 'Failed to download image from storage';
+      console.error('[enrich:image] download error for memory:', memoryId, errMsg);
+      await supabase
+        .from('memories')
+        .update({
+          extraction_status: 'failed',
+          extraction_error: errMsg,
+        } as Record<string, unknown>)
+        .eq('id', memoryId);
+      return;
+    }
+
+    const arrayBuffer = await fileData.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+    const mimeType = memory.file.file_type || 'image/jpeg';
     const userNote = memory.text_content?.trim() ?? '';
 
-    // Single image fetch: OCR + description in parallel, one network request (fixes P4).
-    const analysis = await ai.ocrAndDescribeImage({ fileUrl: memory.fileUrl });
+    // Direct in-memory buffer analysis (zero HTTP self-fetch)
+    const analysis = await ai.ocrAndDescribeImage({ buffer, mimeType });
     const { description, ocrText } = analysis;
 
-    // Preserve the user's own note first, then append what the model saw.
+    // Preserve user note first, then append vision description and OCR text
     const parts = [userNote, description, ocrText].filter(Boolean);
     const combined = Array.from(new Set(parts)).join('\n\n').trim();
-
-    // The text we index (lexical) and embed (semantic). Fall back to the note.
     const searchText = combined || userNote;
 
-    const update: { text_content?: string; embedding?: string } = {};
+    const update: {
+      text_content?: string;
+      embedding?: string;
+      extraction_status: string;
+      extraction_error: string | null;
+    } = {
+      extraction_status: 'done',
+      extraction_error: null,
+    };
     if (combined && combined !== userNote) update.text_content = combined;
 
-    // Semantic fingerprint for meaning-based search (best-effort, independent):
+    // Semantic fingerprint for meaning-based search
     if (searchText) {
       try {
         const vector = await ai.embed({ text: searchText });
         if (vector.length > 0) update.embedding = JSON.stringify(vector);
-      } catch {
-        // Embeddings are optional; lexical search still works without them.
+      } catch (embedErr) {
+        console.warn(
+          '[enrich:image] embedding generation failed (lexical still works):',
+          memoryId,
+          embedErr instanceof Error ? embedErr.message : String(embedErr),
+        );
       }
     }
 
-    // Nothing new to store (no text change and no embedding) → leave as-is.
-    if (Object.keys(update).length === 0) return;
+    const { error: updateError } = await supabase
+      .from('memories')
+      .update(update as Record<string, unknown>)
+      .eq('id', memoryId);
 
-    const { error: updateError } = await supabase.from('memories').update(update).eq('id', memoryId);
     if (updateError) {
-      console.error('[enrich] failed to update image memory:', memoryId, updateError);
+      console.error('[enrich:image] failed to update image memory row:', memoryId, updateError.message);
+      await supabase
+        .from('memories')
+        .update({
+          extraction_status: 'failed',
+          extraction_error: updateError.message,
+        } as Record<string, unknown>)
+        .eq('id', memoryId);
     } else {
       revalidatePath('/');
       revalidatePath(`/memory/${memoryId}`);
     }
-  } catch {
-    // Best-effort by design: never surface an error — capture already succeeded.
+  } catch (err) {
+    const errorMsg = err instanceof Error ? err.message : String(err);
+    console.error('[enrich:imageFatal]', memoryId, errorMsg);
+    try {
+      await supabase
+        .from('memories')
+        .update({
+          extraction_status: 'failed',
+          extraction_error: errorMsg.slice(0, 500),
+        } as Record<string, unknown>)
+        .eq('id', memoryId);
+    } catch {
+      // Best-effort error state recording
+    }
   }
 }
 

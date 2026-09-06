@@ -4,7 +4,7 @@ import { useEffect, useRef, useState, useTransition, type FormEvent } from 'reac
 import { createPortal } from 'react-dom';
 import { useRouter } from 'next/navigation';
 import { createMemory } from '@/app/actions/memories';
-import { enrichImageMemory, enrichGenericMemory } from '@/app/actions/enrich';
+import { enrichGenericMemory } from '@/app/actions/enrich';
 import { Button } from '@/components/ui/Button';
 import { TextField } from '@/components/ui/TextField';
 import { useToast } from '@/components/ui/Toast';
@@ -213,10 +213,8 @@ export function CaptureButton() {
 
         if (result.memoryId) {
           const id = result.memoryId;
-          if (savingKind === 'image') {
-            void enrichImageMemory(id).then(() => router.refresh());
-          } else if (savingKind === 'document') {
-            // enrichDocumentMemory is already invoked on the server by createMemory.
+          if (savingKind === 'image' || savingKind === 'document') {
+            // Both document and image enrichment are invoked on the server by createMemory.
             // Avoid duplicate parallel calls.
             router.refresh();
           } else {
