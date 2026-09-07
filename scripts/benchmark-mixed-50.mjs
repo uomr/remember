@@ -14,7 +14,7 @@ try {
 } catch {}
 
 import { parseQueryIntent } from '../src/lib/memories/queryUnderstanding.ts';
-import { rankCandidatesByCompoundIntent } from '../src/lib/memories/queries.ts';
+const { rankCandidatesByCompoundIntent } = await import('../src/lib/memories/queries.ts');
 
 if (typeof globalThis.WebSocket === 'undefined') {
   globalThis.WebSocket = class DummyWebSocket {};
