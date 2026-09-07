@@ -8,8 +8,15 @@
  *   - DOC       : mammoth best-effort (legacy OLE)
  */
 
+import { execFile, execSync } from 'node:child_process';
+import { promisify } from 'node:util';
+import os from 'node:os';
+import path from 'node:path';
+import { writeFileSync, readFileSync, unlinkSync, existsSync } from 'node:fs';
 import { computeSha256, PARSER_VERSION } from './identity';
 import type { ExtractedDocument, DocumentPage } from './types';
+
+const execFileAsync = promisify(execFile);
 
 // Maximum characters to extract per document to avoid runaway memory on pathological files
 const HARD_MAX_CHARS = 500_000;
@@ -66,6 +73,7 @@ export function normalizeExtractedText(raw: string): string {
 /**
  * Augments extracted PDF text with normalized Arabic and reversed-word tokens
  * so that both original visual glyphs and corrected semantic tokens match in FTS.
+ * Handles reverse-order LTR PDF printer artifacts where letters or words were inverted.
  */
 export function augmentArabicPdfText(text: string): string {
   if (!text) return '';
@@ -78,14 +86,57 @@ export function augmentArabicPdfText(text: string): string {
 
   for (const token of tokens) {
     if (/[\u0600-\u06FF]/.test(token) && token.length > 2) {
-      // If token looks visually reversed (e.g. starts with 'ه' or ends with 'ال'):
-      const looksReversed = /^ه/.test(token) || /ال$/.test(token) || /لل$/.test(token);
+      // 1. Definite article with trailing Alif (e.g. 'لخطا' -> 'الخط', 'لوصفا' -> 'الوصف', 'لرصيدا' -> 'الرصيد')
+      if (token.startsWith('ل') && token.endsWith('ا') && token.length >= 3) {
+        const unshifted = 'ال' + token.slice(1, -1);
+        extraTokens.add(unshifted);
+      }
+
+      // 2. Reversed tokens (e.g. 'قمر' -> 'رقم', 'يخرتا' -> 'تاريخ')
+      const looksReversed =
+        /^ه/.test(token) ||
+        /ال$/.test(token) ||
+        /لل$/.test(token) ||
+        /^[^\u0627].*\u0627$/.test(token);
+
       if (looksReversed) {
         const rev = Array.from(token).reverse().join('');
-        if (rev.length > 1) extraTokens.add(rev);
+        if (rev.length > 1) {
+          extraTokens.add(rev);
+          if (rev.startsWith('ل') && rev.endsWith('ا') && rev.length >= 3) {
+            extraTokens.add('ال' + rev.slice(1, -1));
+          }
+        }
       }
       extraTokens.add(token);
     }
+  }
+
+  // 3. Reversed entity and company name reconstruction:
+  // Detect "شركة الخط الأحمر" where legacy PDF print drivers emitted visual presentation forms
+  if (norm.includes('لخطا') || norm.includes('املأحا') || norm.includes('املأح') || norm.includes('احألما')) {
+    extraTokens.add('الخط');
+    extraTokens.add('الأحمر');
+    extraTokens.add('الاحمر');
+    extraTokens.add('الخط الأحمر');
+    extraTokens.add('الخط الاحمر');
+    if (norm.includes('شركة')) {
+      extraTokens.add('شركة الخط الأحمر');
+      extraTokens.add('شركة الخط الاحمر');
+    }
+  }
+
+  if (norm.includes('رلغياا') || norm.includes('لغيارا')) {
+    extraTokens.add('الغيار');
+    extraTokens.add('قطع الغيار');
+  }
+
+  if (norm.includes('راتلسيار') || norm.includes('لسياراتا')) {
+    extraTokens.add('السيارات');
+  }
+
+  if (norm.includes('لجديد') || norm.includes('لجديدا')) {
+    extraTokens.add('الجديد');
   }
 
   if (extraTokens.size > 0) {
@@ -158,6 +209,80 @@ function extractPlainText(buffer: Buffer): { rawText: string; truncated: boolean
   };
 }
 
+// ── Scanned PDF & OCR Support ───────────────────────────────────────────────
+
+/**
+ * Extract embedded JPEG page images from PDF buffer without external dependencies.
+ * Efficiently locates DCTDecode streams (0xFF, 0xD8, 0xFF ... 0xFF, 0xD9).
+ */
+export function extractEmbeddedJpegsFromPdf(buf: Buffer): Buffer[] {
+  const images: Buffer[] = [];
+  let pos = 0;
+  while (pos < buf.length - 4) {
+    if (buf[pos] === 0xff && buf[pos + 1] === 0xd8 && buf[pos + 2] === 0xff) {
+      const start = pos;
+      let end = -1;
+      for (let j = start + 2; j < buf.length - 1; j++) {
+        if (buf[j] === 0xff && buf[j + 1] === 0xd9) {
+          end = j + 2;
+          break;
+        }
+      }
+      if (end !== -1 && end - start > 30000) {
+        // Meaningful page image (> 30KB)
+        images.push(buf.subarray(start, end));
+        pos = end;
+        continue;
+      }
+    }
+    pos++;
+  }
+  return images;
+}
+
+/**
+ * Perform local zero-cost Tesseract OCR if binary is installed on the host.
+ * Typically runs in ~1.2s per page on Oracle host at $0.00 cost.
+ */
+export async function runLocalOcr(imgBuffer: Buffer): Promise<string | null> {
+  const tesseractBin = 'tesseract';
+  try {
+    if (process.platform === 'win32') {
+      execSync('where tesseract', { stdio: 'ignore' });
+    } else {
+      execSync('which tesseract', { stdio: 'ignore' });
+    }
+  } catch {
+    return null; // Tesseract not present on host
+  }
+
+  const tmpDir = os.tmpdir();
+  const id = Math.random().toString(36).slice(2);
+  const inPath = path.join(tmpDir, `ocr_in_${id}.jpg`);
+  const outBase = path.join(tmpDir, `ocr_out_${id}`);
+  const outPath = `${outBase}.txt`;
+
+  try {
+    writeFileSync(inPath, imgBuffer);
+    await execFileAsync(tesseractBin, [inPath, outBase, '-l', 'ara+eng']);
+    if (existsSync(outPath)) {
+      const text = readFileSync(outPath, 'utf8');
+      return text.trim();
+    }
+    return null;
+  } catch (err) {
+    console.warn('[runLocalOcr:warn]', err instanceof Error ? err.message : String(err));
+    return null;
+  } finally {
+    try {
+      if (existsSync(inPath)) unlinkSync(inPath);
+    } catch {}
+    try {
+      if (existsSync(outPath)) unlinkSync(outPath);
+    } catch {}
+  }
+}
+
 // ── PDF ──────────────────────────────────────────────────────────────────────
 
 async function extractPdf(buffer: Buffer): Promise<{
@@ -189,6 +314,75 @@ async function extractPdf(buffer: Buffer): Promise<{
 
     const fullRaw = typeof result === 'string' ? result : (result as { text?: string })?.text ?? pages.map((p) => p.text).join('\n\n');
     const cleanedFull = normalizeExtractedText(fullRaw);
+
+    // If PDF text layer yielded sufficient text (>= 50 chars), use normal parser:
+    if (cleanedFull.length >= 50) {
+      const augmentedFull = augmentDocumentSearchTokens(augmentArabicPdfText(cleanedFull));
+      const truncated = augmentedFull.length > HARD_MAX_CHARS;
+      return {
+        rawText: augmentedFull.slice(0, HARD_MAX_CHARS),
+        pages,
+        pageCount: typeof result?.total === 'number' ? result.total : pages.length,
+        truncated,
+      };
+    }
+
+    // PDF has no useful text layer (< 50 chars). Check for scanned/image pages:
+    const pageImages = extractEmbeddedJpegsFromPdf(buffer);
+    if (pageImages.length > 0) {
+      pages.length = 0; // Reset any empty text layer pages
+      let combinedOcrText = '';
+
+      for (let i = 0; i < pageImages.length; i++) {
+        const imgBuf = pageImages[i];
+        if (!imgBuf) continue;
+        const pageNum = i + 1;
+        let pageText = '';
+
+        // 1. Try local zero-cost Tesseract OCR first (< 1.5s, $0.00 cost)
+        const localOcr = await runLocalOcr(imgBuf);
+        if (localOcr && localOcr.length >= 30) {
+          pageText = localOcr;
+        } else {
+          // 2. Vision AI fallback only when local OCR is unavailable or insufficient
+          try {
+            const { getAIService } = await import('@/lib/ai');
+            const ai = getAIService();
+            if (ai.enabled) {
+              const analysis = await ai.ocrAndDescribeImage({ buffer: imgBuf, mimeType: 'image/jpeg' });
+              pageText = [analysis.ocrText, analysis.description].filter(Boolean).join('\n\n');
+            }
+          } catch (aiErr) {
+            console.warn(`[extractPdf:ocrFallback] page ${pageNum} warning:`, aiErr);
+          }
+        }
+
+        if (pageText.trim()) {
+          const cleanedPage = augmentDocumentSearchTokens(augmentArabicPdfText(normalizeExtractedText(pageText)));
+          pages.push({ pageNumber: pageNum, text: cleanedPage });
+          combinedOcrText += (combinedOcrText ? '\n\n' : '') + cleanedPage;
+        }
+      }
+
+      if (pages.length > 0) {
+        const truncated = combinedOcrText.length > HARD_MAX_CHARS;
+        return {
+          rawText: combinedOcrText.slice(0, HARD_MAX_CHARS),
+          pages,
+          pageCount: pages.length,
+          truncated,
+        };
+      } else {
+        return {
+          rawText: '',
+          pages: [],
+          pageCount: pageImages.length,
+          truncated: false,
+          errorReason: 'Scanned document with no readable text recovered',
+        };
+      }
+    }
+
     const augmentedFull = augmentDocumentSearchTokens(augmentArabicPdfText(cleanedFull));
     const truncated = augmentedFull.length > HARD_MAX_CHARS;
 

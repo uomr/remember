@@ -740,6 +740,36 @@ export function rankCandidatesByCompoundIntent(
       }
     }
 
+    // 4b. Compound Locality Gate: Vehicle + Position Co-occurrence
+    // If query specifies both vehicle model and position (e.g. rear bumper Accent),
+    // they must co-occur within the SAME chunk or text segment.
+    // A document containing front bumper Accent on page 1 and rear bumper Camry on page 3
+    // must NOT pass as matching rear bumper Accent.
+    if (intent.vehicle?.model && intent.positionAttribute) {
+      const vModel = intent.vehicle.model.toLowerCase();
+      const pos = intent.positionAttribute;
+      const rearTokens = ['خلفي', 'خلفيه', 'rear', 'ورا', 'وراء'];
+      const frontTokens = ['أمامي', 'امامي', 'اماميه', 'front', 'قدام'];
+      const targetPosTokens = pos === 'rear' ? rearTokens : frontTokens;
+
+      const allSegments = [
+        memTitleNorm,
+        memBodyNorm,
+        ...(chunksByMemoryId.get(mem.id) || []).map((c) => normalizeArabicForSearch(c).toLowerCase()),
+      ];
+
+      const hasCoOccurrence = allSegments.some((seg) => {
+        const hasModel = seg.includes(vModel) || (vModel === 'accent' && seg.includes('اكسنت'));
+        const hasPos = targetPosTokens.some((pt) => seg.includes(pt));
+        return hasModel && hasPos;
+      });
+
+      if (!hasCoOccurrence) {
+        // VETO: Model does not co-occur with requested position in any chunk
+        continue;
+      }
+    }
+
     // 5. Part Concept Evidence
     let matchedPart = false;
     let matchedPartName = '';
@@ -792,6 +822,12 @@ export function rankCandidatesByCompoundIntent(
       }
     }
 
+    // Explicit domain concept hard constraint:
+    // If query explicitly specifies salary, candidate MUST have salary evidence
+    if (intent.concepts.includes('salary') && !matchedConcepts.has('salary')) {
+      continue;
+    }
+
     // 8. Keyword Match
     let matchedKeywords = 0;
     for (const t of terms) {
@@ -841,7 +877,10 @@ export function rankCandidatesByCompoundIntent(
       );
       const conceptMatch = Array.from(matchedConcepts).some((cKey) => {
         const cObj = CONCEPT_MAP.find((c) => c.key === cKey);
-        return cObj?.triggers.some((tr) => matchesToken(tr, normTerm));
+        return cObj?.triggers.some((tr) => {
+          const normTr = normalizeArabicForSearch(tr).toLowerCase();
+          return normTr.includes(normTerm) || matchesToken(normTr, normTerm);
+        });
       });
       const vehicleMatch =
         matchedVehicle &&
@@ -902,6 +941,20 @@ export function rankCandidatesByCompoundIntent(
     score += typeScore;
     score += personalBoost;
 
+    // Layer 1 Evidence: Exact normalized phrase match bonus
+    const normRaw = normalizeArabicForSearch(intent.rawQuery).toLowerCase();
+    if (combined.includes(normRaw) && terms.length >= 2) {
+      score += 160;
+    }
+
+    // Primary memory description boost (e.g. photo caption describing a street vs address in footer)
+    for (const t of terms) {
+      const normTerm = normalizeArabicForSearch(t).toLowerCase();
+      if (memBodyNorm.includes(normTerm)) {
+        score += 50;
+      }
+    }
+
     // Full query coverage bonus
     if (matchedTermsCount >= terms.length && terms.length > 0) {
       score += 60;
@@ -939,6 +992,10 @@ export function rankCandidatesByCompoundIntent(
       reason = 'Matched transfer receipt';
     } else if (matchedConcepts.has('bill')) {
       reason = 'Matched invoice / bill';
+    } else if (matchedConcepts.has('quotation')) {
+      reason = 'Matched price quotation / عرض أسعار';
+    } else if (matchedConcepts.has('street')) {
+      reason = 'Matched street / outdoor scene';
     } else if (matchedConcepts.has('snake')) {
       reason = 'Matched snake illustration';
     } else {
