@@ -23,6 +23,10 @@ export interface ImageDescription {
 export interface ImageAnalysis {
   description: string;
   ocrText: string;
+  rawOcr?: string;
+  detectedEnglish?: string[];
+  normalizedEntities?: string[];
+  keywords?: string[];
 }
 
 /** Result of extracting text from a document. */

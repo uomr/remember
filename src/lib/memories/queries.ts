@@ -1079,6 +1079,10 @@ export function rankCandidatesByCompoundIntent(
       reason = 'Matched street / outdoor scene';
     } else if (matchedConcepts.has('snake')) {
       reason = 'Matched snake illustration';
+    } else if (matchedConcepts.has('drink')) {
+      reason = 'Matched coffee / drink';
+    } else if (matchedConcepts.has('water')) {
+      reason = 'Matched water / beverage';
     } else {
       reason = 'Direct text match';
     }

@@ -43,7 +43,11 @@ export function normalizeArabicForSearch(text: string): string {
     .replace(/ة/g, 'ه')
     // 6. Normalize Alef Maksura (ى -> ي)
     .replace(/ى/g, 'ي')
-    // 7. Map common PDF font substitutions (dotless letters)
+    // 7. Map Farsi / Urdu / regional variants of Yeh, Kaf, and Heh to standard Arabic
+    .replace(/[\u06CC\u06CD\u06CE\u06D0\u06D1]/g, 'ي')
+    .replace(/[\u06A9\u06AA\u06AB\u06AC]/g, 'ك')
+    .replace(/[\u06C0\u06C1\u06C2\u06C3\u06D5\u06BE]/g, 'ه')
+    // 8. Map common PDF font substitutions (dotless letters)
     .replace(/\u066E/g, 'ت')
     .replace(/\u06A1/g, 'ف')
     .replace(/\u066F/g, 'ق')
@@ -350,7 +354,13 @@ async function extractPdf(buffer: Buffer): Promise<{
             const ai = getAIService();
             if (ai.enabled) {
               const analysis = await ai.ocrAndDescribeImage({ buffer: imgBuf, mimeType: 'image/jpeg' });
-              pageText = [analysis.ocrText, analysis.description].filter(Boolean).join('\n\n');
+              const parts = [
+                analysis.ocrText || analysis.rawOcr,
+                analysis.description,
+                analysis.normalizedEntities?.join('\n'),
+                analysis.detectedEnglish?.join(' • '),
+              ].filter(Boolean);
+              pageText = parts.join('\n\n');
             }
           } catch (aiErr) {
             console.warn(`[extractPdf:ocrFallback] page ${pageNum} warning:`, aiErr);

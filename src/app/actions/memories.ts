@@ -305,17 +305,35 @@ export async function updateMemory(formData: FormData): Promise<ActionResult> {
     } else {
       // For image or document: preserve machine description while updating human note
       const existingText = memory.text_content ?? '';
-      const existingParts = existingText.split('\n\n').map((p) => p.trim()).filter(Boolean);
-      const machineParts = existingParts.slice(1);
 
-      if (newNote) {
-        if (machineParts.length > 0) {
-          updatedTextContent = [newNote, ...machineParts].join('\n\n');
+      if (
+        existingText.includes('[USER NOTE]') ||
+        existingText.includes('[VISUAL DESCRIPTION]') ||
+        existingText.includes('[NORMALIZED ENTITIES & CONTEXT]') ||
+        existingText.includes('[RAW OCR]')
+      ) {
+        // Strip previous [USER NOTE] block if present
+        const machineSections = existingText.replace(/^\[USER NOTE\][\s\S]*?(?=\n\n\[[A-Z\s&]+\]|$)/i, '').trim();
+        if (newNote) {
+          updatedTextContent = machineSections
+            ? `[USER NOTE]\n${newNote}\n\n${machineSections}`
+            : `[USER NOTE]\n${newNote}`;
         } else {
-          updatedTextContent = newNote;
+          updatedTextContent = machineSections || null;
         }
       } else {
-        updatedTextContent = machineParts.length > 0 ? machineParts.join('\n\n') : null;
+        const existingParts = existingText.split('\n\n').map((p) => p.trim()).filter(Boolean);
+        const machineParts = existingParts.slice(1);
+
+        if (newNote) {
+          if (machineParts.length > 0) {
+            updatedTextContent = [newNote, ...machineParts].join('\n\n');
+          } else {
+            updatedTextContent = newNote;
+          }
+        } else {
+          updatedTextContent = machineParts.length > 0 ? machineParts.join('\n\n') : null;
+        }
       }
     }
 

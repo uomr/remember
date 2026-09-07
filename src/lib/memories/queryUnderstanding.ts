@@ -237,8 +237,13 @@ export const CONCEPT_MAP = [
   },
   {
     key: 'drink',
-    triggers: ['قهوة', 'قهوه', 'كوفي', 'كوب', 'ماء', 'مياه', 'موية', 'شرب', 'أشرب', 'اشرب', 'طاولة', 'الطاولة', 'طاوله', 'coffee', 'mug', 'cup', 'water', 'drink'],
-    expansions: ['قهوة', 'كوفي', 'ماء', 'مياه', 'coffee', 'water'],
+    triggers: ['قهوة', 'قهوه', 'كوفي', 'كوب', 'شرب', 'أشرب', 'اشرب', 'طاولة', 'الطاولة', 'طاوله', 'coffee', 'mug', 'cup', 'drink'],
+    expansions: ['قهوة', 'كوفي', 'coffee', 'mug', 'cup'],
+  },
+  {
+    key: 'water',
+    triggers: ['ماء', 'مياه', 'موية', 'قارورة', 'قنينة', 'water', 'bottle'],
+    expansions: ['ماء', 'مياه', 'موية', 'water', 'bottle'],
   },
   {
     key: 'desk_objects',
@@ -327,7 +332,10 @@ export function normalizeArabicOrthography(str: string): string {
     .replace(/\u0640/g, '') // strip tatweel
     .replace(/[أإآ]/g, 'ا')
     .replace(/ة/g, 'ه')
-    .replace(/ى/g, 'ي');
+    .replace(/ى/g, 'ي')
+    .replace(/[\u06CC\u06CD\u06CE\u06D0\u06D1]/g, 'ي')
+    .replace(/[\u06A9\u06AA\u06AB\u06AC]/g, 'ك')
+    .replace(/[\u06C0\u06C1\u06C2\u06C3\u06D5\u06BE]/g, 'ه');
 }
 
 /**

@@ -52,7 +52,19 @@ async function toDataUrl(fileUrl: string, signal: AbortSignal): Promise<string> 
  * Low-level call to OpenRouter chat completions. Returns the assistant's text.
  * Throws on any non-OK response or timeout; callers decide how to handle it.
  */
-async function chat(content: ChatMessageContent[], signal: AbortSignal): Promise<string> {
+async function chat(
+  content: ChatMessageContent[],
+  signal: AbortSignal,
+  options?: { responseFormatJson?: boolean },
+): Promise<string> {
+  const bodyPayload: Record<string, unknown> = {
+    model,
+    messages: [{ role: 'user', content }],
+  };
+  if (options?.responseFormatJson) {
+    bodyPayload.response_format = { type: 'json_object' };
+  }
+
   const res = await fetch(`${baseUrl}/chat/completions`, {
     method: 'POST',
     signal,
@@ -63,10 +75,7 @@ async function chat(content: ChatMessageContent[], signal: AbortSignal): Promise
       'HTTP-Referer': referer,
       'X-Title': title,
     },
-    body: JSON.stringify({
-      model,
-      messages: [{ role: 'user', content }],
-    }),
+    body: JSON.stringify(bodyPayload),
   });
 
   if (!res.ok) {
@@ -93,6 +102,7 @@ async function askAboutImageData(
   dataUrl: string,
   prompt: string,
   signal: AbortSignal,
+  options?: { responseFormatJson?: boolean },
 ): Promise<string> {
   return chat(
     [
@@ -100,6 +110,7 @@ async function askAboutImageData(
       { type: 'image_url', image_url: { url: dataUrl } },
     ],
     signal,
+    options,
   );
 }
 
@@ -160,6 +171,24 @@ const DESCRIBE_PROMPT =
   '"Keywords:" listing 5-10 search terms in BOTH English and Arabic. Return only ' +
   'that text, with no extra commentary.';
 
+const MULTI_SOURCE_EXTRACTION_PROMPT =
+  'You are a forensic document and vision OCR intelligence engine.\n' +
+  'Analyze this image thoroughly to extract all visible text and provide cross-language normalized entities for search indexing.\n\n' +
+  'Observe that Arabic text captured from screens or camera photos often suffers from classic OCR character confusions:\n' +
+  "1. The teeth of 'س' often blur into 'م' (e.g. 'سير' misread as 'مير').\n" +
+  "2. The loop of 'ص' often resembles 'م' (e.g. 'صني' misread as 'مني').\n" +
+  "3. Multi-dot letters (ب, ت, ث, ن, ي) merge or lose dots (e.g. 'ياباني' misread as 'يااتي').\n" +
+  "4. Letter joining artifacts (e.g. 'دركسون' misread as 'در كتون').\n" +
+  '5. Contextual anchors: Use the surrounding words, brand names (Nissan, Toyota, Dell, Apple, Samsung, etc.), product codes, part numbers, model numbers, English text, and visual scene context to resolve and repair degraded Arabic words.\n\n' +
+  'Return your response strictly in valid JSON (no markdown formatting, no code fences, just raw JSON) with this exact schema:\n' +
+  '{\n' +
+  '  "visualDescription": "Concise visual description in English, followed by an equivalent Arabic description. Mention concrete objects, colors, layout, and setting.",\n' +
+  '  "rawOcr": "Verbatim transcript of ALL visible text in the image exactly as written, preserving reading order and any character/spelling errors.",\n' +
+  '  "detectedEnglish": ["List of accurate Latin/English text, brand names, product codes, part numbers, model numbers, serials, or technical identifiers visible in the image"],\n' +
+  '  "normalizedEntities": ["Cross-referenced, normalized entities and repaired terms. Using the English text, product codes, brand names, and surrounding words as anchors, output the true canonical intended terms in BOTH Arabic and English (e.g., if you see \'میر در کتون\' -> include \'سير دركسون\' and \'steering belt\'; if you see \'كرسي مكينه مني\' with Nissan -> include \'كرسي مكينة صني\' and \'Nissan Sunny engine mount\'; if you see \'يااتي\' with \'MADE IN JAPAN\' -> include \'ياباني\' and \'Japanese\'). Ensure all major products, parts, brands, and entities are present."],\n' +
+  '  "keywords": ["High-signal search keywords in both English and Arabic that a user might naturally use to search for this memory"]\n' +
+  '}';
+
 /** The concrete OpenRouter-backed AIService. */
 export const openRouterProvider: AIService = {
   enabled: true,
@@ -180,23 +209,54 @@ export const openRouterProvider: AIService = {
   },
 
   /**
-   * Fetch/prepare the image exactly ONCE and run both OCR and describe passes in parallel.
-   * This halves bandwidth and eliminates the race condition where the signed URL
-   * expires between the two sequential calls (fixes G2 / P4 from audit).
+   * Fetch/prepare the image exactly ONCE and run multi-source extraction,
+   * OCR, and cross-language context normalization in a single vision call.
+   * Cuts network bandwidth and OpenRouter cost in half while maximizing accuracy.
    */
   async ocrAndDescribeImage(input: { fileUrl?: string; buffer?: Buffer; mimeType?: string }): Promise<ImageAnalysis> {
     if (!apiKey) throw new Error('OpenRouter API key is not configured.');
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs * 2); // two model calls share one budget
+    const timer = setTimeout(() => controller.abort(), timeoutMs * 2);
     try {
       const dataUrl = await resolveImageDataUrl(input, controller.signal);
-      const [descResult, ocrResult] = await Promise.allSettled([
-        askAboutImageData(dataUrl, DESCRIBE_PROMPT, controller.signal),
-        askAboutImageData(dataUrl, OCR_PROMPT, controller.signal),
-      ]);
+      const rawResponse = await askAboutImageData(
+        dataUrl,
+        MULTI_SOURCE_EXTRACTION_PROMPT,
+        controller.signal,
+        { responseFormatJson: true },
+      );
+
+      let parsed: {
+        visualDescription?: string;
+        rawOcr?: string;
+        detectedEnglish?: string[];
+        normalizedEntities?: string[];
+        keywords?: string[];
+      } | null = null;
+
+      try {
+        const cleaned = rawResponse.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+        parsed = JSON.parse(cleaned);
+      } catch (parseErr) {
+        console.warn('[ocrAndDescribeImage:parseWarning] JSON parse failed, using fallback:', parseErr);
+      }
+
+      if (parsed) {
+        return {
+          description: parsed.visualDescription?.trim() || '',
+          ocrText: parsed.rawOcr?.trim() || '',
+          rawOcr: parsed.rawOcr?.trim() || '',
+          detectedEnglish: Array.isArray(parsed.detectedEnglish) ? parsed.detectedEnglish.filter(Boolean) : [],
+          normalizedEntities: Array.isArray(parsed.normalizedEntities) ? parsed.normalizedEntities.filter(Boolean) : [],
+          keywords: Array.isArray(parsed.keywords) ? parsed.keywords.filter(Boolean) : [],
+        };
+      }
+
+      // Defensive fallback if response was unformatted plain text
       return {
-        description: descResult.status === 'fulfilled' ? descResult.value.trim() : '',
-        ocrText: ocrResult.status === 'fulfilled' ? ocrResult.value.trim() : '',
+        description: rawResponse.slice(0, 500).trim(),
+        ocrText: rawResponse.trim(),
+        rawOcr: rawResponse.trim(),
       };
     } finally {
       clearTimeout(timer);

@@ -5,6 +5,7 @@ import { createClient } from '@/lib/supabase/server';
 import { getMemory } from '@/lib/memories/queries';
 import { getAIService } from '@/lib/ai';
 import { STORAGE_BUCKET } from '@/lib/config';
+import { repairSuspiciousOcrContext } from '@/lib/documents/ocrRepair';
 
 /**
  * Phase 2 — invisible intelligence.
@@ -92,11 +93,40 @@ export async function enrichImageMemory(memoryId: string): Promise<void> {
 
     // Direct in-memory buffer analysis (zero HTTP self-fetch)
     const analysis = await ai.ocrAndDescribeImage({ buffer, mimeType });
-    const { description, ocrText } = analysis;
+    const { description, ocrText, rawOcr, detectedEnglish, normalizedEntities, keywords } = analysis;
 
-    // Preserve user note first, then append vision description and OCR text
-    const parts = [userNote, description, ocrText].filter(Boolean);
-    const combined = Array.from(new Set(parts)).join('\n\n').trim();
+    // Structured multi-source representation separating:
+    // USER NOTE, VISUAL DESCRIPTION, NORMALIZED ENTITIES & CONTEXT, KEYWORDS, DETECTED CODES, RAW OCR
+    const sections: string[] = [];
+
+    if (userNote) {
+      sections.push(`[USER NOTE]\n${userNote}`);
+    }
+    if (description) {
+      sections.push(`[VISUAL DESCRIPTION]\n${description}`);
+    }
+    const ocrToSave = rawOcr || ocrText;
+    const contextCombined = [userNote, description, ...(detectedEnglish || [])].join(' ');
+    const algorithmicRepairs = ocrToSave ? repairSuspiciousOcrContext(ocrToSave, contextCombined) : [];
+
+    const mergedEntities = Array.from(
+      new Set([...(normalizedEntities || []), ...algorithmicRepairs]),
+    );
+
+    if (mergedEntities.length > 0) {
+      sections.push(`[NORMALIZED ENTITIES & CONTEXT]\n${mergedEntities.join('\n')}`);
+    }
+    if (keywords && keywords.length > 0) {
+      sections.push(`[KEYWORDS]\n${keywords.join(' • ')}`);
+    }
+    if (detectedEnglish && detectedEnglish.length > 0) {
+      sections.push(`[DETECTED IDENTIFIERS & CODES]\n${detectedEnglish.join(' • ')}`);
+    }
+    if (ocrToSave) {
+      sections.push(`[RAW OCR]\n${ocrToSave}`);
+    }
+
+    const combined = sections.join('\n\n').trim();
     const searchText = combined || userNote;
 
     const update: {
