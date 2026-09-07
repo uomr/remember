@@ -647,8 +647,8 @@ export function rankCandidatesByCompoundIntent(
         }
       }
 
-      if (monthContradiction || (!matchedMonth && intent.temporalConstraint)) {
-        // VETO: Wrong month
+      if (!matchedMonth || monthContradiction) {
+        // VETO: Candidate does not satisfy requested month hard constraint
         continue;
       }
     }

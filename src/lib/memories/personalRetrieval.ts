@@ -127,12 +127,28 @@ export function calculateTemporalDecay(lastUsedAt: string | Date, now: Date = ne
 /**
  * Record a retrieval event and update persistent personal associations.
  *
- * Strictly scoped to the authenticated caller via Supabase server client and RLS.
- * Executes quietly in the background; failure never disrupts the user.
+/**
+ * Cached check for presence of personal retrieval tables (migration 0004).
+ * When migration 0004 is unapplied, fails closed once and avoids issuing
+ * repeated failing queries on every search.
  */
+let tablesAvailable: boolean | null = null;
+
+export function isPersonalRetrievalAvailable(): boolean {
+  return tablesAvailable !== false;
+}
+
+export function setPersonalRetrievalAvailable(available: boolean) {
+  tablesAvailable = available;
+}
+
 export async function recordRetrievalEvent(
   input: RetrievalEventInput,
 ): Promise<{ ok: boolean; confidence: number }> {
+  if (tablesAvailable === false) {
+    return { ok: true, confidence: 0 };
+  }
+
   try {
     const supabase = createClient();
     const {
@@ -233,6 +249,10 @@ export async function getPersonalRetrievalMatches(
   matches: Map<string, PersonalMatch>;
   candidateIds: string[];
 }> {
+  if (tablesAvailable === false) {
+    return { matches: new Map(), candidateIds: [] };
+  }
+
   const cues = extractRetrievalCues(query);
   if (cues.length === 0) {
     return { matches: new Map(), candidateIds: [] };
@@ -246,9 +266,17 @@ export async function getPersonalRetrievalMatches(
       .order('weight', { ascending: false })
       .limit(50);
 
-    if (error || !data || data.length === 0) {
+    if (error) {
+      // Table absent (e.g. migration 0004 unapplied); fail closed and cache absence
+      tablesAvailable = false;
       return { matches: new Map(), candidateIds: [] };
     }
+
+    if (!data || data.length === 0) {
+      return { matches: new Map(), candidateIds: [] };
+    }
+
+    tablesAvailable = true;
 
     const matches = new Map<string, PersonalMatch>();
     const now = new Date();

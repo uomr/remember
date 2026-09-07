@@ -482,10 +482,6 @@ function parseUrlIntent(trimmed: string): UrlIntent | undefined {
 
   // 3. Conversational Link Triggers ("رابط", "رابط موقع محلي", "موقع محلي", "الموقع", "link")
   if (/(?:رابط|الرابط|موقع|الموقع|لينك|اللينك|link|url|website)/i.test(trimmed)) {
-    // If user specified local site / app ("موقع محلي", "تطبيقي", "تطبيق محلي", "local")
-    if (/(?:محلي|تطبيقي|تطبيق|local)/i.test(trimmed)) {
-      return { isLinkQuery: true, pattern: '80.225' };
-    }
     return { isLinkQuery: true };
   }
 
@@ -625,6 +621,8 @@ export function parseQueryIntent(rawQuery: string): ParsedQuery {
   const monthMatch = normalizeDigits(trimmed).match(monthPattern);
   if (monthMatch && monthMatch[1]) {
     const num = String(parseInt(monthMatch[1], 10));
+    numbers.delete(num);
+    numbers.delete(monthMatch[1]);
     const mData = MONTH_DATA.find((m) => m.num === num);
     if (mData) {
       months.add(mData.pad);
