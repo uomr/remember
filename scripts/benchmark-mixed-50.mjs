@@ -1,5 +1,18 @@
 import { readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { createClient } from '@supabase/supabase-js';
+
+const require = createRequire(import.meta.url);
+try {
+  const serverOnlyPath = require.resolve('server-only');
+  require.cache[serverOnlyPath] = {
+    id: serverOnlyPath,
+    filename: serverOnlyPath,
+    loaded: true,
+    exports: {},
+  };
+} catch {}
+
 import { parseQueryIntent } from '../src/lib/memories/queryUnderstanding.ts';
 import { rankCandidatesByCompoundIntent } from '../src/lib/memories/queries.ts';
 
