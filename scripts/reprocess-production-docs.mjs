@@ -14,7 +14,8 @@ const env = Object.fromEntries(
     }),
 );
 
-const admin = createClient(env.NEXT_PUBLIC_SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY, {
+const serviceKey = env.SUPABASE_SERVICE_ROLE_KEY || env.SUPABASE_SECRET_KEY;
+const admin = createClient(env.NEXT_PUBLIC_SUPABASE_URL, serviceKey, {
   auth: { persistSession: false },
 });
 
