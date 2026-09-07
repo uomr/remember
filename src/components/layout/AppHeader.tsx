@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { SignOutButton } from '@/components/auth/SignOutButton';
+import { AccountMenu } from '@/components/layout/AccountMenu';
 import { ThemeToggle } from '@/components/ui/ThemeToggle';
 
 interface AppHeaderProps {
@@ -9,7 +9,7 @@ interface AppHeaderProps {
 }
 
 /**
- * Sticky frosted header with Fraunces brand mark and ThemeToggle.
+ * Sticky frosted header with Fraunces brand mark, ThemeToggle, and intentional AccountMenu.
  * Reads scroll position to toggle backdrop blur and subtle border.
  */
 export function AppHeader({ greetingName }: AppHeaderProps) {
@@ -47,7 +47,7 @@ export function AppHeader({ greetingName }: AppHeaderProps) {
 
         <div className="flex items-center gap-2">
           <ThemeToggle />
-          <SignOutButton />
+          <AccountMenu greetingName={greetingName} />
         </div>
       </div>
     </header>

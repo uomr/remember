@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import sharp from 'sharp';
 import { createClient, createServiceRoleClient } from '@/lib/supabase/server';
 import { STORAGE_BUCKET } from '@/lib/config';
 
@@ -16,6 +17,8 @@ export const dynamic = 'force-dynamic';
  * - Direct public access to the Supabase Storage bucket remains completely blocked.
  *
  * Caching & Performance:
+ * - Supports responsive thumbnails via `?w=400` powered by Sharp (WebP 80% quality).
+ * - Preserves original files untouched in private storage forever.
  * - Emits `ETag` and `Cache-Control: private, max-age=86400, stale-while-revalidate=604800`.
  * - Responds with `304 Not Modified` when `If-None-Match` matches.
  * - Prevents the browser from re-downloading images during search, filtering, and page navigation.
@@ -42,7 +45,12 @@ export async function GET(
     return new NextResponse('File not found or unauthorized', { status: 404 });
   }
 
-  const etag = `"${fileData.id}"`;
+  const searchParams = request.nextUrl.searchParams;
+  const requestedWidth = parseInt(searchParams.get('w') || '0', 10);
+  const isImage = (fileData.file_type || '').startsWith('image/');
+  const shouldResize = isImage && requestedWidth > 0 && requestedWidth <= 800;
+
+  const etag = shouldResize ? `"${fileData.id}-w${requestedWidth}"` : `"${fileData.id}"`;
   const ifNoneMatch = request.headers.get('if-none-match');
 
   // 2. HTTP Cache Validation: If-None-Match -> 304 Not Modified
@@ -66,15 +74,32 @@ export async function GET(
     return new NextResponse('Error retrieving media from storage', { status: 502 });
   }
 
-  const buffer = await blob.arrayBuffer();
+  const rawBuffer = Buffer.from(await blob.arrayBuffer());
 
-  return new NextResponse(buffer, {
+  let responseBuffer: Buffer = rawBuffer;
+  let contentType = fileData.file_type || 'application/octet-stream';
+
+  if (shouldResize) {
+    try {
+      responseBuffer = await sharp(rawBuffer)
+        .resize({ width: requestedWidth, withoutEnlargement: true })
+        .webp({ quality: 80 })
+        .toBuffer();
+      contentType = 'image/webp';
+    } catch {
+      // Fallback gracefully to original bytes if sharp fails
+      responseBuffer = rawBuffer;
+    }
+  }
+
+  return new NextResponse(new Uint8Array(responseBuffer), {
     status: 200,
     headers: {
-      'Content-Type': fileData.file_type || 'application/octet-stream',
-      'Content-Length': String(buffer.byteLength),
+      'Content-Type': contentType,
+      'Content-Length': String(responseBuffer.byteLength),
       'Cache-Control': 'private, max-age=86400, stale-while-revalidate=604800',
       'ETag': etag,
     },
   });
 }
+

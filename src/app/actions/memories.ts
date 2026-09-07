@@ -107,7 +107,8 @@ export async function createMemory(formData: FormData): Promise<ActionResult> {
     const note = String(formData.get('text') ?? '').trim();
 
     const memoryId = randomUUID();
-    const fileName = safeFileName(file.name);
+    const rawName = String(formData.get('fileName') ?? file.name);
+    const fileName = safeFileName(rawName);
     const storagePath = buildStoragePath(user.id, memoryId, fileName);
     const effectiveContentType = validation.mimeType || file.type || 'application/octet-stream';
 
@@ -232,3 +233,32 @@ export async function loadMoreMemories(query: string, offset: number): Promise<M
   const trimmed = query.trim();
   return trimmed ? searchMemories(trimmed, offset) : listMemories(offset);
 }
+
+export interface MemoryStatusUpdate {
+  id: string;
+  extraction_status: 'pending' | 'done' | 'skipped' | 'failed' | null;
+  text_content: string | null;
+  title: string | null;
+}
+
+/**
+ * Check processing status of memories currently pending extraction.
+ * Lightweight, cached/indexed read without full joins.
+ */
+export async function checkMemoryStatuses(memoryIds: string[]): Promise<MemoryStatusUpdate[]> {
+  if (!memoryIds || memoryIds.length === 0) return [];
+  const supabase = createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return [];
+
+  const { data, error } = await supabase
+    .from('memories')
+    .select('id, extraction_status, text_content, title')
+    .in('id', memoryIds.slice(0, 50));
+
+  if (error || !data) return [];
+  return data as MemoryStatusUpdate[];
+}
+

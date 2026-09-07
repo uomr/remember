@@ -4,7 +4,13 @@ import { createClient } from '@/lib/supabase/server';
 import { getAIService } from '@/lib/ai';
 import { selectiveChunkSemanticSearch } from '@/lib/documents/semantic';
 import { normalizeArabicForSearch } from '@/lib/documents/extract';
-import { parseQueryIntent, CONCEPT_MAP, type ParsedQuery } from '@/lib/memories/queryUnderstanding';
+import {
+  parseQueryIntent,
+  normalizeArabicOrthography,
+  CONCEPT_MAP,
+  MONTH_DATA,
+  type ParsedQuery,
+} from '@/lib/memories/queryUnderstanding';
 import {
   getPersonalRetrievalMatches,
   type PersonalMatch,
@@ -26,6 +32,8 @@ export interface MemoryWithFile extends Memory {
   file: MemoryFile | null;
   /** Signed URL for the attached file, or null. */
   fileUrl: string | null;
+  /** Evidence explanation answering "Why did you show me this?" */
+  evidenceReason?: string;
 }
 
 const MEMORY_COLUMNS =
@@ -42,11 +50,13 @@ function resolveFirstFile(
 
 function resolveRows(
   rows: (Memory & { memory_files: MemoryFile[] })[],
+  evidenceReasons?: Map<string, string>,
 ): MemoryWithFile[] {
   return rows.map((row) => {
     const { memory_files, ...memory } = row;
     const { file, fileUrl } = resolveFirstFile(memory.id, memory_files);
-    return { ...memory, file, fileUrl };
+    const evidenceReason = evidenceReasons?.get(memory.id);
+    return { ...memory, file, fileUrl, evidenceReason };
   });
 }
 
@@ -348,7 +358,7 @@ function shouldPerformSelectiveChunkSemanticSearch(
 }
 
 /**
- * Detect whether the query is a URL or domain pattern and return a clean,
+ * Detect whether the query is a URL, IP, or domain pattern and return a clean,
  * sanitized pattern for exact/substring URL search in PostgreSQL.
  */
 function extractUrlTarget(query: string): string | null {
@@ -361,12 +371,18 @@ function extractUrlTarget(query: string): string | null {
     return cleaned || null;
   }
 
-  // 2. Domain pattern (e.g. example.com, my-app.io/path?a=1)
+  // 2. IP address pattern (e.g. 80.225.68.223)
+  const ipMatch = trimmed.match(/\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/);
+  if (ipMatch) {
+    return ipMatch[0];
+  }
+
+  // 3. Domain pattern (e.g. example.com, my-app.io/path?a=1)
   if (/^[a-zA-Z0-9-]+\.[a-zA-Z]{2,}(\S*)?$/i.test(trimmed)) {
     return trimmed.replace(/\/+$/, '');
   }
 
-  // 3. Path or query component of a URL (e.g. /items/392, ?id=123, item?id=39201923)
+  // 4. Path or query component of a URL (e.g. /items/392, ?id=123, item?id=39201923)
   if (
     /^[/?#&][a-zA-Z0-9\-._~%!$&'()*+,;=:@/?#]+$/i.test(trimmed) ||
     /^[a-zA-Z0-9\-._]+\?[a-zA-Z0-9\-._~%!$&'()*+,;=:@/?#]+$/i.test(trimmed)
@@ -379,8 +395,6 @@ function extractUrlTarget(query: string): string | null {
 
 /**
  * Structured Intent candidate ids from memories table.
- * Queries title, url, text_content for extracted numeric formats (quoted if comma),
- * month representations, and concept expansions.
  */
 async function intentCandidateIds(
   supabase: ReturnType<typeof createClient>,
@@ -405,13 +419,26 @@ async function intentCandidateIds(
   }
 
   for (const ex of intent.conceptExpansions) {
-    if (ex.length >= 3) {
+    if (ex.length >= 2) {
       orConditions.push(`text_content.ilike.%${ex}%`, `title.ilike.%${ex}%`);
     }
   }
 
+  if (intent.vehicle?.model) {
+    orConditions.push(`text_content.ilike.%${intent.vehicle.model}%`, `title.ilike.%${intent.vehicle.model}%`);
+  }
+  if (intent.vehicle?.brand) {
+    orConditions.push(`text_content.ilike.%${intent.vehicle.brand}%`, `title.ilike.%${intent.vehicle.brand}%`);
+  }
+  if (intent.partEntity) {
+    orConditions.push(`text_content.ilike.%${intent.partEntity}%`, `title.ilike.%${intent.partEntity}%`);
+  }
+  if (intent.urlIntent?.pattern) {
+    orConditions.push(`url.ilike.%${intent.urlIntent.pattern}%`, `title.ilike.%${intent.urlIntent.pattern}%`);
+  }
+
   if (orConditions.length === 0) return [];
-  const uniqueConds = Array.from(new Set(orConditions)).slice(0, 40);
+  const uniqueConds = Array.from(new Set(orConditions)).slice(0, 50);
 
   const { data, error } = await supabase
     .from('memories')
@@ -449,13 +476,23 @@ async function chunkIntentCandidateIds(
   }
 
   for (const ex of intent.conceptExpansions) {
-    if (ex.length >= 3) {
+    if (ex.length >= 2) {
       orConditions.push(`chunk_text.ilike.%${ex}%`);
     }
   }
 
+  if (intent.vehicle?.model) {
+    orConditions.push(`chunk_text.ilike.%${intent.vehicle.model}%`);
+  }
+  if (intent.vehicle?.brand) {
+    orConditions.push(`chunk_text.ilike.%${intent.vehicle.brand}%`);
+  }
+  if (intent.partEntity) {
+    orConditions.push(`chunk_text.ilike.%${intent.partEntity}%`);
+  }
+
   if (orConditions.length === 0) return [];
-  const uniqueConds = Array.from(new Set(orConditions)).slice(0, 40);
+  const uniqueConds = Array.from(new Set(orConditions)).slice(0, 50);
 
   try {
     const { data, error } = await supabase
@@ -476,75 +513,295 @@ async function chunkIntentCandidateIds(
   }
 }
 
+export interface CompoundRankingResult {
+  ids: string[];
+  evidenceReasons: Map<string, string>;
+}
+
 /**
- * Multi-dimensional compound scoring & negative constraint enforcement.
+ * Token matcher with Arabic proclitic stripping and Latin singular/plural support.
+ * Prevents false-positive substring collisions (e.g. "كتاب" matching "كتابة").
  */
-function rankCandidatesByCompoundIntent(
+export function matchesToken(candidateToken: string, queryTerm: string): boolean {
+  if (candidateToken === queryTerm) return true;
+  const normCand = normalizeArabicOrthography(candidateToken);
+  const normQ = normalizeArabicOrthography(queryTerm);
+  if (normCand === normQ) return true;
+
+  // Arabic proclitic stripping (و, ف, ب, ك, ل, ال)
+  const strippedArabicCand = normCand.replace(/^(و|ف|ب|ك|ل|ال)/, '');
+  const strippedArabicQ = normQ.replace(/^(و|ف|ب|ك|ل|ال)/, '');
+  if (
+    strippedArabicCand === strippedArabicQ ||
+    strippedArabicCand === normQ ||
+    normCand === strippedArabicQ
+  ) {
+    return true;
+  }
+
+  // Latin singular/plural prefix only
+  if (
+    /^[a-z0-9]+$/i.test(queryTerm) &&
+    queryTerm.length >= 4 &&
+    candidateToken.startsWith(queryTerm) &&
+    candidateToken.length <= queryTerm.length + 2
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * General Evidence Aggregator, Constraint Validator & Confidence Gate.
+ *
+ * Implements:
+ *  - Multi-dimensional evidence scoring (lexical, phrase, structured, attribute, entity, temporal)
+ *  - Hard constraints (explicit month, vehicle model, exact number)
+ *  - Contradiction Veto (e.g. rear requested, candidate has front; Accent requested, candidate has Yaris)
+ *  - Confidence Gating (candidates lacking sufficient evidence are dropped)
+ *  - "Why did you show me this?" human-readable evidence explanation
+ */
+export function rankCandidatesByCompoundIntent(
   candidates: (Memory & { memory_files: MemoryFile[] })[],
   intent: ParsedQuery,
   terms: string[],
   chunksByMemoryId: Map<string, string[]>,
   personalMatches?: Map<string, PersonalMatch>,
-): string[] {
-  const scored: { id: string; score: number }[] = [];
+): CompoundRankingResult {
+  const scored: { id: string; score: number; reason: string }[] = [];
 
   for (const mem of candidates) {
     const memTitleNorm = normalizeArabicForSearch(mem.title || '').toLowerCase();
     const memBodyNorm = normalizeArabicForSearch(mem.text_content || '').toLowerCase();
-    const fileNames = (mem.memory_files || []).map((f) => normalizeArabicForSearch(f.file_name).toLowerCase()).join(' ');
+    const memUrlNorm = (mem.url || '').toLowerCase();
+    const fileNames = (mem.memory_files || [])
+      .map((f) => normalizeArabicForSearch(f.file_name).toLowerCase())
+      .join(' ');
     const chunkTexts = (chunksByMemoryId.get(mem.id) || [])
       .map(normalizeArabicForSearch)
       .join(' ')
       .toLowerCase();
-    const combined = `${memTitleNorm} ${memBodyNorm} ${fileNames} ${chunkTexts}`;
+    const combined = `${memTitleNorm} ${memBodyNorm} ${memUrlNorm} ${fileNames} ${chunkTexts}`;
 
-    // 1. Numeric Match (standalone boundary — prevents matching account number slices)
+    // 1. Numeric Evidence & Hard Number Constraint
     let matchedNumber = false;
+    let matchedNumberVal = '';
     if (intent.numbers.length > 0) {
-      matchedNumber = intent.numbers.some((num) => {
+      for (const num of intent.numbers) {
         const cleanNum = num.replace(/,/g, '');
         if (/[^\d]/.test(cleanNum)) {
-          return combined.includes(cleanNum.toLowerCase());
+          if (combined.includes(cleanNum.toLowerCase())) {
+            matchedNumber = true;
+            matchedNumberVal = num;
+            break;
+          }
         }
         const regex = new RegExp(`(^|[^0-9])${cleanNum}([^0-9]|$)`);
-        return regex.test(combined) || (num.includes(',') && combined.includes(num.toLowerCase()));
-      });
+        if (regex.test(combined) || (num.includes(',') && combined.includes(num.toLowerCase()))) {
+          matchedNumber = true;
+          matchedNumberVal = num;
+          break;
+        }
+      }
+
+      // Hard Constraint: Query specified an explicit number (e.g. "2500" or "2000")
+      if (!matchedNumber) {
+        continue;
+      }
     }
 
-    // 2. Month Match (contextual regex or explicit name)
+    // 2. Temporal Month Evidence & Constraint
     let matchedMonth = false;
+    let monthContradiction = false;
+    let matchedMonthName = '';
     if (intent.months.length > 0) {
-      matchedMonth = intent.months.some((m) => {
+      for (const m of intent.months) {
         if (/[a-zA-Z\u0600-\u06FF]/.test(m)) {
-          return combined.includes(m.toLowerCase());
+          if (combined.includes(m.toLowerCase())) {
+            matchedMonth = true;
+            matchedMonthName = m;
+            break;
+          }
         }
         const num = String(parseInt(m, 10));
         const monthContextRegex = new RegExp(`(شهر\\s*0?${num}|[/-]0?${num}[/-]|\\b0?${num}/)`);
-        return monthContextRegex.test(combined);
-      });
+        if (monthContextRegex.test(combined)) {
+          matchedMonth = true;
+          matchedMonthName = m;
+          break;
+        }
+      }
+
+      // Check for conflicting month when query specifies explicit/relative month (e.g. Month 8 August)
+      if (intent.temporalConstraint?.targetMonthNum) {
+        const target = intent.temporalConstraint.targetMonthNum;
+        if (!matchedMonth) {
+          const hasConflictingMonth = MONTH_DATA.some((md) => {
+            if (parseInt(md.num, 10) === target) return false;
+            return (
+              md.names.some((n) => combined.includes(n.toLowerCase())) ||
+              new RegExp(`(شهر\\s*0?${md.num}|[/-]0?${md.num}[/-])`).test(combined)
+            );
+          });
+          if (hasConflictingMonth) monthContradiction = true;
+        }
+      }
+
+      if (monthContradiction || (!matchedMonth && intent.temporalConstraint)) {
+        // VETO: Wrong month
+        continue;
+      }
     }
 
-    // 3. Concept Match - Per-concept tracking
+    // 3. Vehicle Constraint & Contradiction Veto
+    let matchedVehicle = false;
+    let vehicleContradiction = false;
+    let matchedVehicleName = '';
+    if (intent.vehicle) {
+      const v = intent.vehicle;
+      const hasAccent = combined.includes('اكسنت') || combined.includes('accent');
+      const hasYaris = combined.includes('يارس') || combined.includes('yaris');
+      const hasTaurus = combined.includes('تورس') || combined.includes('taurus');
+      const hasNissan = combined.includes('نيسان') || combined.includes('nissan');
+      const hasFord = combined.includes('فورد') || combined.includes('ford');
+
+      if (v.model === 'accent') {
+        if (hasAccent) {
+          matchedVehicle = true;
+          matchedVehicleName = 'Accent';
+        } else if (hasYaris || hasTaurus) {
+          vehicleContradiction = true;
+        } else {
+          // Specific car model missing
+          continue;
+        }
+      } else if (v.model === 'yaris') {
+        if (hasYaris) {
+          matchedVehicle = true;
+          matchedVehicleName = 'Yaris';
+        } else if (hasAccent || hasTaurus) {
+          vehicleContradiction = true;
+        } else {
+          continue;
+        }
+      } else if (v.model === 'taurus') {
+        if (hasTaurus) {
+          matchedVehicle = true;
+          matchedVehicleName = 'Taurus';
+        } else if (hasAccent || hasYaris) {
+          vehicleContradiction = true;
+        } else {
+          continue;
+        }
+      }
+
+      if (v.brand === 'nissan') {
+        if (hasNissan) {
+          matchedVehicle = true;
+          matchedVehicleName = 'Nissan';
+        } else if ((hasFord || hasYaris) && !hasNissan) {
+          vehicleContradiction = true;
+        } else {
+          continue;
+        }
+      }
+
+      if (vehicleContradiction) {
+        // VETO: Contradicting vehicle brand/model
+        continue;
+      }
+    }
+
+    // 4. Position Attribute & Contradiction Veto
+    let matchedPosition = false;
+    let positionContradiction = false;
+    if (intent.positionAttribute) {
+      const pos = intent.positionAttribute;
+      const hasRear = combined.includes('خلفي') || combined.includes('خلفيه') || combined.includes('rear') || combined.includes('ورا');
+      const hasFront = combined.includes('أمامي') || combined.includes('امامي') || combined.includes('اماميه') || combined.includes('front');
+
+      if (pos === 'rear') {
+        if (hasRear) {
+          matchedPosition = true;
+        } else if (hasFront && !hasRear) {
+          positionContradiction = true;
+        }
+      } else if (pos === 'front') {
+        if (hasFront) {
+          matchedPosition = true;
+        } else if (hasRear && !hasFront) {
+          positionContradiction = true;
+        }
+      }
+
+      if (positionContradiction) {
+        // VETO: Contradicting position (front vs rear)
+        continue;
+      }
+    }
+
+    // 5. Part Concept Evidence
+    let matchedPart = false;
+    let matchedPartName = '';
+    if (intent.partEntity) {
+      const p = intent.partEntity;
+      if (p === 'bumper' && (combined.includes('صدام') || combined.includes('صدامات') || combined.includes('bumper'))) {
+        matchedPart = true;
+        matchedPartName = 'صدام / Bumper';
+      } else if (p === 'seal' && (combined.includes('سداد') || combined.includes('seal') || combined.includes('d4abm'))) {
+        matchedPart = true;
+        matchedPartName = 'سدادة / Seal';
+      } else if (p === 'stapler' && (combined.includes('دباس') || combined.includes('stapler'))) {
+        matchedPart = true;
+        matchedPartName = 'دباسة / Stapler';
+      } else if (p === 'pencil' && (combined.includes('قلم') || combined.includes('مرسام') || combined.includes('pencil'))) {
+        matchedPart = true;
+        matchedPartName = 'قلم / Pencil';
+      } else if (p === 'spare_part' && (combined.includes('قطع') || combined.includes('غيار') || combined.includes('spare'))) {
+        matchedPart = true;
+        matchedPartName = 'قطعة غيار';
+      }
+    }
+
+    // 6. URL & Link Intent Evidence
+    let matchedUrl = false;
+    if (intent.urlIntent?.isLinkQuery) {
+      if (mem.type === 'link') {
+        matchedUrl = true;
+        if (intent.urlIntent.pattern && (mem.url || '').includes(intent.urlIntent.pattern)) {
+          matchedUrl = true;
+        }
+      }
+    }
+
+    const memTokens = combined.match(/[\p{L}\p{N}]+/gu) || [];
+
+    // 7. Concept Match
     const matchedConcepts = new Set<string>();
     for (const cKey of intent.concepts) {
       const cObj = CONCEPT_MAP.find((c) => c.key === cKey);
       if (cObj) {
-        const hasConceptInMem = cObj.expansions.some((ex) =>
-          combined.includes(normalizeArabicForSearch(ex).toLowerCase()),
-        );
+        const hasConceptInMem = cObj.expansions.some((ex) => {
+          const normEx = normalizeArabicForSearch(ex).toLowerCase();
+          return (
+            (normEx.includes(' ') && combined.includes(normEx)) ||
+            memTokens.some((tok) => matchesToken(tok, normEx))
+          );
+        });
         if (hasConceptInMem) matchedConcepts.add(cKey);
       }
     }
 
-    // 4. Keyword Match
+    // 8. Keyword Match
     let matchedKeywords = 0;
     for (const t of terms) {
-      if (combined.includes(normalizeArabicForSearch(t).toLowerCase())) {
+      const normTerm = normalizeArabicForSearch(t).toLowerCase();
+      if (memTokens.some((tok) => matchesToken(tok, normTerm))) {
         matchedKeywords++;
       }
     }
 
-    // 5. Title & Filename Direct Relevance Boosts
+    // 9. Direct Title / URL relevance boosts
     let titleBoost = 0;
     for (const t of terms) {
       if (memTitleNorm.includes(normalizeArabicForSearch(t).toLowerCase())) titleBoost += 120;
@@ -560,84 +817,150 @@ function rankCandidatesByCompoundIntent(
       if (monthInTitle) titleBoost += 100;
     }
 
-    // 6. Type Affinity Bonus
+    // 10. Type Affinity Bonus
     let typeScore = 0;
     if (intent.typeHint && mem.type === intent.typeHint) {
       typeScore = 50;
     }
 
-    // 7. Personal Retrieval Memory Boost
+    // 11. Personal Retrieval Boost
     let personalBoost = 0;
     if (personalMatches && personalMatches.has(mem.id)) {
       const pMatch = personalMatches.get(mem.id)!;
       personalBoost = Math.round(pMatch.effectiveWeight * 180);
     }
 
-    // Negative constraints:
-    // If query has explicit number requirement, and candidate does NOT match number:
-    if (intent.numbers.length > 0 && !matchedNumber) {
+    // Multi-term coverage: evaluate how many distinct core terms are satisfied
+    let matchedTermsCount = 0;
+    for (const t of terms) {
+      const normTerm = normalizeArabicForSearch(t).toLowerCase();
+      const tokenMatch = memTokens.some((tok) => matchesToken(tok, normTerm));
+      const titleMatch = memTitleNorm.includes(normTerm);
+      const chunkMatch = (chunksByMemoryId.get(mem.id) || []).some((c) =>
+        normalizeArabicForSearch(c).toLowerCase().includes(normTerm),
+      );
+      const conceptMatch = Array.from(matchedConcepts).some((cKey) => {
+        const cObj = CONCEPT_MAP.find((c) => c.key === cKey);
+        return cObj?.triggers.some((tr) => matchesToken(tr, normTerm));
+      });
+      const vehicleMatch =
+        matchedVehicle &&
+        (intent.vehicle?.rawMention?.includes(normTerm) ||
+          intent.vehicle?.model?.includes(normTerm) ||
+          intent.vehicle?.brand?.includes(normTerm));
+      const partMatch = matchedPart && normTerm.includes(intent.partEntity ?? '');
+      const urlMatch = matchedUrl && (mem.url?.includes(normTerm) || memTitleNorm.includes(normTerm));
+      const numberMatch =
+        matchedNumber &&
+        intent.numbers.some((n) => n.replace(/,/g, '') === normTerm.replace(/,/g, ''));
+
+      if (tokenMatch || titleMatch || chunkMatch || conceptMatch || vehicleMatch || partMatch || urlMatch || numberMatch) {
+        matchedTermsCount++;
+      }
+    }
+
+    if (matchedUrl) {
+      matchedTermsCount = Math.max(matchedTermsCount, terms.length);
+    }
+
+    // Compound Term Coverage Gate:
+    // If query has 2 or more distinct core terms, a candidate must satisfy at least 2 distinct terms
+    // or possess an exact phrase match. Matching only 1 term from a 2-term query (e.g. only "سيارة"
+    // from "سيارة سباق", or only "فاتورة" from "فاتورة كهربا") is rejected.
+    const hasExactPhrase = combined.includes(normalizeArabicForSearch(intent.rawQuery).toLowerCase());
+    if (terms.length >= 2 && matchedTermsCount < 2 && !hasExactPhrase) {
       continue;
     }
 
-    // If query has explicit month requirement, and candidate does NOT match month:
-    if (intent.months.length > 0 && !matchedMonth) {
+    const hasConcreteEvidence =
+      matchedNumber ||
+      matchedMonth ||
+      matchedVehicle ||
+      matchedPosition ||
+      matchedPart ||
+      matchedUrl ||
+      matchedConcepts.size > 0 ||
+      matchedKeywords >= 1 ||
+      titleBoost > 0 ||
+      personalBoost > 0;
+
+    if (!hasConcreteEvidence) {
       continue;
     }
 
-    // If candidate matches neither numbers, months, concepts, keywords, title, nor personal associations:
-    if (
-      !matchedNumber &&
-      !matchedMonth &&
-      matchedConcepts.size === 0 &&
-      matchedKeywords === 0 &&
-      titleBoost === 0 &&
-      personalBoost === 0
-    ) {
-      continue;
-    }
-
-    // Score computation
+    // Score Computation
     let score = 0;
-    if (matchedNumber) score += 120;
-    if (matchedMonth) score += 100;
+    if (matchedNumber) score += 140;
+    if (matchedMonth) score += 120;
+    if (matchedVehicle) score += 150;
+    if (matchedPosition) score += 130;
+    if (matchedPart) score += 120;
+    if (matchedUrl) score += 200;
     score += matchedConcepts.size * 90;
-    score += matchedKeywords * 35;
+    score += matchedKeywords * 80;
     score += titleBoost;
     score += typeScore;
     score += personalBoost;
 
-    // Multi-concept synergy bonus
+    // Full query coverage bonus
+    if (matchedTermsCount >= terms.length && terms.length > 0) {
+      score += 60;
+    }
+
+    // Multi-concept and multidimensional synergy
     if (matchedConcepts.size >= 2) score += 150;
+    if (matchedVehicle && matchedPart) score += 200;
+    if (matchedMonth && matchedNumber) score += 200;
 
-    // Multidimensional synergy bonus:
-    const queryDims =
-      (intent.numbers.length > 0 ? 1 : 0) +
-      (intent.months.length > 0 ? 1 : 0) +
-      (intent.concepts.length > 0 ? 1 : 0);
-    const matchedDims =
-      (matchedNumber ? 1 : 0) + (matchedMonth ? 1 : 0) + (matchedConcepts.size > 0 ? 1 : 0);
+    const MIN_CONFIDENCE_THRESHOLD = 50;
+    if (score < MIN_CONFIDENCE_THRESHOLD) {
+      continue;
+    }
 
-    if (queryDims >= 3 && matchedDims >= 3) score += 400;
-    else if (queryDims >= 2 && matchedDims >= 2) score += 200;
+    // Generate readable evidence explanation for UI
+    let reason = '';
+    if (matchedVehicle && matchedPart) {
+      reason = `Matched ${matchedVehicleName} ${matchedPartName}`;
+    } else if (matchedVehicle) {
+      reason = `Matched ${matchedVehicleName}`;
+    } else if (matchedMonth && matchedNumber) {
+      reason = `Matched ${matchedMonthName} (${matchedNumberVal})`;
+    } else if (matchedMonth) {
+      reason = `Matched ${matchedMonthName}`;
+    } else if (matchedUrl) {
+      reason = 'Matched saved web link';
+    } else if (matchedNumber) {
+      reason = `Matched amount ${matchedNumberVal}`;
+    } else if (matchedPart) {
+      reason = `Matched ${matchedPartName}`;
+    } else if (matchedConcepts.has('salary')) {
+      reason = 'Matched salary record';
+    } else if (matchedConcepts.has('transfer')) {
+      reason = 'Matched transfer receipt';
+    } else if (matchedConcepts.has('bill')) {
+      reason = 'Matched invoice / bill';
+    } else if (matchedConcepts.has('snake')) {
+      reason = 'Matched snake illustration';
+    } else {
+      reason = 'Direct text match';
+    }
 
-    scored.push({ id: mem.id, score });
+    scored.push({ id: mem.id, score, reason });
   }
 
   scored.sort((a, b) => b.score - a.score);
-  return scored.map((s) => s.id);
+
+  const evidenceReasons = new Map<string, string>();
+  scored.forEach((s) => evidenceReasons.set(s.id, s.reason));
+
+  return {
+    ids: scored.map((s) => s.id),
+    evidenceReasons,
+  };
 }
 
 /**
  * Search the current user's memories — HYBRID (lexical + chunk + semantic).
- *
- * Recall strategies run in parallel and are fused with RRF:
- *  • memory lexical       — prefix full-text + substring on title/url/note
- *  • chunk lexical (M2A)  — deep document chunk search in memory_chunks (covers page 47, invoices, etc.)
- *  • parent semantic      — pgvector nearest-neighbour over meaning embeddings
- *  • chunk semantic (M2B) — selective/lazy representative chunk expansion for conceptual queries
- *
- * RLS scopes ALL paths to the caller. Zero AI cost for exact lexical queries.
- * Results are ordered by fused relevance and returned as ONE Memory per result.
  */
 export interface FastSearchResult {
   memories: MemoryWithFile[];
@@ -665,18 +988,31 @@ export async function searchMemoriesFast(
   const filter = buildSearchFilter(trimmed, terms);
   const supabase = createClient();
 
-  // 1. Literal URL / domain search pass (parameterized, wildcards escaped)
-  const urlTarget = extractUrlTarget(trimmed);
+  // 1. Literal URL / domain / IP search pass
+  const urlTarget = extractUrlTarget(trimmed) || intent.urlIntent?.pattern;
   let urlMatchIds: string[] = [];
   if (urlTarget) {
     const escapedTarget = urlTarget.replace(/[%_\\]/g, '\\$&');
     const { data: urlData } = await supabase
       .from('memories')
       .select('id')
-      .ilike('url', `%${escapedTarget}%`)
+      .or(`url.ilike.%${escapedTarget}%,title.ilike.%${escapedTarget}%`)
       .limit(limit);
     if (urlData) {
       urlMatchIds = (urlData as { id: string }[]).map((r) => r.id);
+    }
+  }
+
+  // If query is a general link intent ("رابط", "موقع"), retrieve link memories directly
+  if (intent.urlIntent?.isLinkQuery && urlMatchIds.length === 0) {
+    const { data: linkData } = await supabase
+      .from('memories')
+      .select('id')
+      .eq('type', 'link')
+      .order('created_at', { ascending: false })
+      .limit(limit);
+    if (linkData) {
+      urlMatchIds = (linkData as { id: string }[]).map((r) => r.id);
     }
   }
 
@@ -738,26 +1074,27 @@ export async function searchMemoriesFast(
       }
     }
   } catch {
-    // Best-effort: chunk texts are optional for scoring
+    // Best-effort
   }
 
-  // Rank candidates using compound intent, negative constraints, and personal retrieval
+  // Rank candidates using compound intent, negative constraints, and confidence gate
   let rankedIds: string[] = [];
-  if (intent.hasStructuredIntent || personalMatches.size > 0) {
-    rankedIds = rankCandidatesByCompoundIntent(candidateRows, intent, terms, chunksByMemoryId, personalMatches);
-    if (urlMatchIds.length > 0) {
-      const urlSet = new Set(urlMatchIds);
-      rankedIds = [...urlMatchIds, ...rankedIds.filter((id) => !urlSet.has(id))];
-    }
-  } else {
-    // Fallback to RRF / lexical ordering when no structured numbers/months/concepts are found
-    const lexicalIds = Array.from(new Set([...urlMatchIds, ...rawLexicalIds]));
-    const allLexicalIds = Array.from(new Set([...lexicalIds, ...chunkIds]));
-    rankedIds = allLexicalIds;
-    if (urlMatchIds.length > 0) {
-      const urlSet = new Set(urlMatchIds);
-      rankedIds = [...urlMatchIds, ...rankedIds.filter((id) => !urlSet.has(id))];
-    }
+  let evidenceReasons = new Map<string, string>();
+
+  const compoundResult = rankCandidatesByCompoundIntent(
+    candidateRows,
+    intent,
+    terms,
+    chunksByMemoryId,
+    personalMatches,
+  );
+  rankedIds = compoundResult.ids;
+  evidenceReasons = compoundResult.evidenceReasons;
+
+  // If candidate was an explicit URL match, preserve at top
+  if (urlMatchIds.length > 0) {
+    const urlSet = new Set(urlMatchIds);
+    rankedIds = [...urlMatchIds, ...rankedIds.filter((id) => !urlSet.has(id))];
   }
 
   if (rankedIds.length === 0) {
@@ -773,7 +1110,7 @@ export async function searchMemoriesFast(
   });
 
   return {
-    memories: resolveRows(rows),
+    memories: resolveRows(rows, evidenceReasons),
     hasMore: rankedIds.length > offset + limit,
     fastIds: rankedIds,
   };
@@ -781,7 +1118,7 @@ export async function searchMemoriesFast(
 
 /**
  * Tier 2 Search: Semantic + Cross-lingual + Personal Retrieval + AI Reranker.
- * Runs in background or when Tier 1 results are sparse (< 2) or query is non-Latin/conceptual.
+ * Runs in background or when Tier 1 results are sparse (< 2) or query is conceptual.
  */
 export async function searchMemoriesDeep(
   query: string,
@@ -792,6 +1129,8 @@ export async function searchMemoriesDeep(
   const trimmed = query.trim();
   if (!trimmed) return listMemories(offset, limit);
 
+  const intent = parseQueryIntent(trimmed);
+  const terms = intent.coreTerms.length > 0 ? intent.coreTerms : tokenize(trimmed);
   const supabase = createClient();
   const hasDenseLexicalHits = fastIds.length >= 2;
 
@@ -812,7 +1151,7 @@ export async function searchMemoriesDeep(
         HYBRID_CANDIDATE_POOL,
       );
     } catch {
-      // Best-effort: failures never break search
+      // Best-effort
     }
   }
 
@@ -833,25 +1172,52 @@ export async function searchMemoriesDeep(
   if (error || !data) return { memories: [], hasMore: false };
 
   const candidateRows = data as (Memory & { memory_files: MemoryFile[] })[];
-  const byId = new Map(candidateRows.map((row) => [row.id, row]));
 
-  let rankedIds = fastIds.length > 0
-    ? fastIds.filter((id) => byId.has(id))
-    : retrievedIds.filter((id) => byId.has(id));
+  // Retrieve chunks for compound evidence validation
+  const chunksByMemoryId = new Map<string, string[]>();
+  try {
+    const { data: chunkRows } = await supabase
+      .from('memory_chunks')
+      .select('memory_id, chunk_text')
+      .in('memory_id', retrievedIds)
+      .limit(100);
 
-  // Merge any semantic hits that aren't in fastIds
-  const rankedSet = new Set(rankedIds);
-  for (const id of retrievedIds) {
-    if (!rankedSet.has(id) && byId.has(id)) {
-      rankedIds.push(id);
-      rankedSet.add(id);
+    for (const cr of chunkRows || []) {
+      const mid = (cr as { memory_id?: unknown; chunk_text?: unknown }).memory_id;
+      const ctext = (cr as { chunk_text?: unknown }).chunk_text;
+      if (typeof mid === 'string' && typeof ctext === 'string') {
+        const list = chunksByMemoryId.get(mid) || [];
+        list.push(ctext);
+        chunksByMemoryId.set(mid, list);
+      }
     }
+  } catch {
+    // Best-effort
   }
 
+  // Validate ALL candidates (including semantic) against compound constraints & confidence gate!
+  const compoundResult = rankCandidatesByCompoundIntent(
+    candidateRows,
+    intent,
+    terms,
+    chunksByMemoryId,
+    personalRecall.matches,
+  );
+
+  let rankedIds = compoundResult.ids;
+  const evidenceReasons = compoundResult.evidenceReasons;
+
+  if (rankedIds.length === 0) {
+    // Confidence Gate cleanly rejected all unsupported semantic neighbors
+    return { memories: [], hasMore: false };
+  }
+
+  const byId = new Map(candidateRows.map((row) => [row.id, row]));
+
   const ai = getAIService();
-  if (ai.enabled && shouldCallReranker(fastIds, retrievedIds)) {
+  if (ai.enabled && shouldCallReranker(fastIds, rankedIds)) {
     try {
-      const candidateIdsForJudge = retrievedIds.slice(0, RERANKER_MAX_CANDIDATES);
+      const candidateIdsForJudge = rankedIds.slice(0, RERANKER_MAX_CANDIDATES);
       const judged = await ai.rankSearch({
         query: trimmed,
         candidates: candidateIdsForJudge.flatMap((id) => {
@@ -867,7 +1233,9 @@ export async function searchMemoriesDeep(
             : [];
         }),
       });
-      rankedIds = judged.ids;
+      if (judged.ids && judged.ids.length > 0) {
+        rankedIds = judged.ids;
+      }
     } catch {
       // Conservative fallback retained
     }
@@ -881,7 +1249,7 @@ export async function searchMemoriesDeep(
     const row = byId.get(id);
     return row ? [row] : [];
   });
-  return { memories: resolveRows(rows), hasMore };
+  return { memories: resolveRows(rows, evidenceReasons), hasMore };
 }
 
 /**
@@ -896,12 +1264,12 @@ export async function searchMemories(
   const trimmed = query.trim();
   if (!trimmed) return listMemories(offset, limit);
 
-  const fast = await searchMemoriesFast(trimmed, offset, limit);
   const intent = parseQueryIntent(trimmed);
+  const fast = await searchMemoriesFast(trimmed, offset, limit);
 
-  // Fast Path: If fast results found matches via structured intent (numbers/months/concepts)
-  // or dense lexical hits (>= 3), return immediately ($0 AI, < 30ms latency)
-  if (fast.memories.length >= 1 && (intent.hasStructuredIntent || fast.memories.length >= 3)) {
+  // Fast Path: If fast results found matches via structured intent (numbers/months/concepts/URL)
+  // or dense lexical hits (>= 2), return immediately ($0 AI, < 30ms latency)
+  if (fast.memories.length >= 1 && (intent.hasStructuredIntent || fast.memories.length >= 2)) {
     return { memories: fast.memories, hasMore: fast.hasMore };
   }
 
@@ -909,6 +1277,12 @@ export async function searchMemories(
   // If an explicit number was queried (e.g. "50000") and no memory contains it,
   // do NOT invoke semantic retrieval to avoid false-positive hallucinations
   if (fast.memories.length === 0 && intent.numbers.length > 0) {
+    return { memories: [], hasMore: false };
+  }
+
+  // If query specified an explicit vehicle model (e.g. "اكسنت") and fast found nothing,
+  // do NOT invoke semantic retrieval to avoid returning unrelated cars
+  if (fast.memories.length === 0 && intent.vehicle?.model) {
     return { memories: [], hasMore: false };
   }
 

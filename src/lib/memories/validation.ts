@@ -123,11 +123,34 @@ export function normalizeUrl(raw: string): string | null {
   }
 }
 
+/**
+ * Detects whether a string is encoded in Latin-1 / ISO-8859-1 containing UTF-8 multibyte
+ * sequences (classic HTTP multipart header mojibake for non-ASCII filenames) and restores
+ * genuine UTF-8 characters (Arabic, accented Latin, etc.).
+ */
+export function recoverUtf8(raw: string): string {
+  if (!raw) return '';
+  try {
+    // If the string contains high bytes (\xC0-\xFF) typical of UTF-8 multi-byte leaders
+    if (/[\xC0-\xFF]/.test(raw)) {
+      const decoded = Buffer.from(raw, 'latin1').toString('utf8');
+      if (!decoded.includes('\uFFFD')) {
+        return decoded;
+      }
+    }
+  } catch {
+    // Fallback safely to raw string
+  }
+  return raw;
+}
+
 /** Strip path separators so a user file name can't escape its storage folder.
  *  Uses `\p{L}\p{N}` (Unicode letters + digits) instead of `\w` so Arabic,
  *  CJK and accented characters are preserved rather than replaced with `_`. */
 export function safeFileName(name: string): string {
-  const base = name.split(/[\\\/]/).pop() ?? 'file';
+  const recovered = recoverUtf8(name);
+  const base = recovered.split(/[\\\/]/).pop() ?? 'file';
   // The `u` flag enables Unicode property escapes (\p{L} = any letter, \p{N} = any digit).
-  return base.replace(/[^\p{L}\p{N}.\- ]+/gu, '_').slice(0, 200) || 'file';
+  return base.replace(/[^\p{L}\p{N}.\-_ ()]+/gu, '_').slice(0, 200) || 'file';
 }
+

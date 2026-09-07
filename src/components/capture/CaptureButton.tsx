@@ -56,6 +56,32 @@ export function CaptureButton() {
     setError(null);
   }
 
+  function rotateImage() {
+    if (!selectedImage) return;
+    const img = new Image();
+    const currentUrl = previewUrl || URL.createObjectURL(selectedImage);
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = img.height;
+      canvas.height = img.width;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+      ctx.translate(canvas.width / 2, canvas.height / 2);
+      ctx.rotate((90 * Math.PI) / 180);
+      ctx.drawImage(img, -img.width / 2, -img.height / 2);
+      canvas.toBlob((blob) => {
+        if (!blob) return;
+        const rotatedFile = new File([blob], selectedImage.name, {
+          type: selectedImage.type || 'image/jpeg',
+        });
+        if (previewUrl) URL.revokeObjectURL(previewUrl);
+        setSelectedImage(rotatedFile);
+        setPreviewUrl(URL.createObjectURL(rotatedFile));
+      }, selectedImage.type || 'image/jpeg', 0.92);
+    };
+    img.src = currentUrl;
+  }
+
   function close() {
     setOpen(false);
     reset();
@@ -190,6 +216,12 @@ export function CaptureButton() {
         return;
       }
       formData.set('file', selectedImage);
+      formData.set('fileName', selectedImage.name);
+    } else if (kind === 'document') {
+      const docFile = formData.get('file');
+      if (docFile instanceof File) {
+        formData.set('fileName', docFile.name);
+      }
     }
 
     const savingKind = kind;
@@ -426,17 +458,30 @@ export function CaptureButton() {
                                   className="max-h-56 w-full object-contain"
                                 />
                               ) : null}
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setSelectedImage(null);
-                                  if (previewUrl) URL.revokeObjectURL(previewUrl);
-                                  setPreviewUrl(null);
-                                }}
-                                className="absolute top-2 right-2 rounded-lg bg-black/60 backdrop-blur-sm px-2.5 py-1 text-xs text-white/90 hover:bg-black/80 transition-colors"
-                              >
-                                Change
-                              </button>
+                              <div className="absolute top-2 right-2 flex items-center gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={rotateImage}
+                                  title="Rotate 90°"
+                                  className="rounded-lg bg-black/60 backdrop-blur-sm px-2.5 py-1 text-xs text-white/90 hover:bg-black/80 transition-colors flex items-center gap-1"
+                                >
+                                  <svg className="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                                    <path strokeLinecap="round" strokeLinejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                                  </svg>
+                                  <span>Rotate</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setSelectedImage(null);
+                                    if (previewUrl) URL.revokeObjectURL(previewUrl);
+                                    setPreviewUrl(null);
+                                  }}
+                                  className="rounded-lg bg-black/60 backdrop-blur-sm px-2.5 py-1 text-xs text-white/90 hover:bg-black/80 transition-colors"
+                                >
+                                  Change
+                                </button>
+                              </div>
                             </div>
                             <p className="text-xs text-ink-muted truncate">
                               {selectedImage.name} ({Math.round(selectedImage.size / 1024)} KB)

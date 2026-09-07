@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef, useMemo, useTransition } from 'react';
 import type { MemoryWithFile } from '@/lib/memories/queries';
-import { loadMoreMemories } from '@/app/actions/memories';
+import { loadMoreMemories, checkMemoryStatuses } from '@/app/actions/memories';
 import { logRetrievalEventAction } from '@/app/actions/retrieval';
 import { SearchBar } from '@/components/search/SearchBar';
 import { FilterTabs, type FilterKind } from './FilterTabs';
@@ -59,6 +59,43 @@ export function MemoryLibrary({
       setHasMore(initialHasMore);
     }
   }, [initialMemories, initialHasMore, query]);
+
+  // Active status synchronization for pending document/image extractions
+  useEffect(() => {
+    const pendingIds = memories
+      .filter((m) => m.extraction_status === 'pending')
+      .map((m) => m.id);
+
+    if (pendingIds.length === 0) return;
+
+    let cancelled = false;
+    const interval = setInterval(async () => {
+      try {
+        const updates = await checkMemoryStatuses(pendingIds);
+        if (cancelled || updates.length === 0) return;
+
+        setMemories((prev) =>
+          prev.map((m) => {
+            const update = updates.find((u) => u.id === m.id);
+            if (!update) return m;
+            return {
+              ...m,
+              extraction_status: update.extraction_status,
+              text_content: update.text_content ?? m.text_content,
+              title: update.title ?? m.title,
+            };
+          }),
+        );
+      } catch {
+        // Silently ignore network errors during poll
+      }
+    }, 1500);
+
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [memories]);
 
   // Cleanup timers and abort controllers on unmount
   useEffect(() => {
@@ -125,10 +162,9 @@ export function MemoryLibrary({
         setHasMore(Boolean(fastData.hasMore));
 
         const fastHits = fastData.memories?.length ?? 0;
-        const hasArabic = /[\u0600-\u06FF]/.test(trimmed);
 
-        // If fast results are exact and dense (>= 3 hits) and not Arabic, finish immediately!
-        if (fastHits >= 3 && !hasArabic) {
+        // If fast results are exact and dense (>= 2 hits), finish immediately ($0 AI)
+        if (fastHits >= 2) {
           setIsSearching(false);
           try {
             window.history.replaceState(
@@ -156,7 +192,7 @@ export function MemoryLibrary({
 
         if (thisSeq !== querySeq.current) return;
 
-        if (deepData.memories && deepData.memories.length > 0) {
+        if (deepData.memories) {
           setMemories(deepData.memories);
           setHasMore(Boolean(deepData.hasMore));
         }

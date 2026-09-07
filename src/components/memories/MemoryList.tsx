@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useState, useTransition } from 'react';
-import { loadMoreMemories } from '@/app/actions/memories';
+import { loadMoreMemories, checkMemoryStatuses } from '@/app/actions/memories';
 import type { MemoryWithFile } from '@/lib/memories/queries';
 import { Button } from '@/components/ui/Button';
 import { MemoryCard } from './MemoryCard';
@@ -34,6 +34,43 @@ export function MemoryList({
     setHasMore(initialHasMore);
     setError(null);
   }, [initialMemories, initialHasMore]);
+
+  // Active status synchronization for pending document/image extractions
+  useEffect(() => {
+    const pendingIds = memories
+      .filter((m) => m.extraction_status === 'pending')
+      .map((m) => m.id);
+
+    if (pendingIds.length === 0) return;
+
+    let cancelled = false;
+    const interval = setInterval(async () => {
+      try {
+        const updates = await checkMemoryStatuses(pendingIds);
+        if (cancelled || updates.length === 0) return;
+
+        setMemories((prev) =>
+          prev.map((m) => {
+            const update = updates.find((u) => u.id === m.id);
+            if (!update) return m;
+            return {
+              ...m,
+              extraction_status: update.extraction_status,
+              text_content: update.text_content ?? m.text_content,
+              title: update.title ?? m.title,
+            };
+          }),
+        );
+      } catch {
+        // Silently ignore network hiccup during background polling
+      }
+    }, 1500);
+
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [memories]);
 
   const counts = useMemo<Record<FilterKind, number>>(() => {
     return {
