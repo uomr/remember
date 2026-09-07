@@ -650,6 +650,11 @@ export function parseQueryIntent(rawQuery: string): ParsedQuery {
       });
       expandedTokens.add(mData.pad);
       expandedTokens.add(mData.num);
+    } else {
+      // Out-of-range or unseen month number (e.g. شهر 99, month 13)
+      // Retain as explicit month constraint so non-matching documents are vetoed
+      months.add(num);
+      expandedTokens.add(num);
     }
   }
 

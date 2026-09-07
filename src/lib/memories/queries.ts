@@ -664,6 +664,8 @@ export function rankCandidatesByCompoundIntent(
       const hasTaurus = combined.includes('تورس') || combined.includes('taurus');
       const hasNissan = combined.includes('نيسان') || combined.includes('nissan');
       const hasFord = combined.includes('فورد') || combined.includes('ford');
+      const hasToyota = combined.includes('تويوتا') || combined.includes('toyota') || hasYaris;
+      const hasHyundai = combined.includes('هيونداي') || combined.includes('هونداي') || combined.includes('hyundai') || hasAccent;
 
       if (v.model === 'accent') {
         if (hasAccent) {
@@ -699,7 +701,34 @@ export function rankCandidatesByCompoundIntent(
         if (hasNissan) {
           matchedVehicle = true;
           matchedVehicleName = 'Nissan';
-        } else if ((hasFord || hasYaris) && !hasNissan) {
+        } else if ((hasFord || hasYaris || hasAccent || hasToyota) && !hasNissan) {
+          vehicleContradiction = true;
+        } else {
+          continue;
+        }
+      } else if (v.brand === 'toyota') {
+        if (hasToyota) {
+          matchedVehicle = true;
+          matchedVehicleName = 'Toyota';
+        } else if ((hasAccent || hasFord || hasNissan || hasTaurus) && !hasToyota) {
+          vehicleContradiction = true;
+        } else {
+          continue;
+        }
+      } else if (v.brand === 'ford') {
+        if (hasFord || hasTaurus) {
+          matchedVehicle = true;
+          matchedVehicleName = 'Ford';
+        } else if ((hasAccent || hasToyota || hasNissan) && !(hasFord || hasTaurus)) {
+          vehicleContradiction = true;
+        } else {
+          continue;
+        }
+      } else if (v.brand === 'hyundai') {
+        if (hasHyundai) {
+          matchedVehicle = true;
+          matchedVehicleName = 'Hyundai';
+        } else if ((hasFord || hasToyota || hasNissan) && !hasHyundai) {
           vehicleContradiction = true;
         } else {
           continue;
@@ -741,12 +770,13 @@ export function rankCandidatesByCompoundIntent(
     }
 
     // 4b. Compound Locality Gate: Vehicle + Position Co-occurrence
-    // If query specifies both vehicle model and position (e.g. rear bumper Accent),
+    // If query specifies both vehicle (model or brand) and position (e.g. rear bumper Accent, rear bumper Toyota),
     // they must co-occur within the SAME chunk or text segment.
     // A document containing front bumper Accent on page 1 and rear bumper Camry on page 3
     // must NOT pass as matching rear bumper Accent.
-    if (intent.vehicle?.model && intent.positionAttribute) {
-      const vModel = intent.vehicle.model.toLowerCase();
+    if (intent.vehicle && intent.positionAttribute) {
+      const vModel = (intent.vehicle.model || '').toLowerCase();
+      const vBrand = (intent.vehicle.brand || '').toLowerCase();
       const pos = intent.positionAttribute;
       const rearTokens = ['خلفي', 'خلفيه', 'rear', 'ورا', 'وراء'];
       const frontTokens = ['أمامي', 'امامي', 'اماميه', 'front', 'قدام'];
@@ -758,14 +788,47 @@ export function rankCandidatesByCompoundIntent(
         ...(chunksByMemoryId.get(mem.id) || []).map((c) => normalizeArabicForSearch(c).toLowerCase()),
       ];
 
-      const hasCoOccurrence = allSegments.some((seg) => {
-        const hasModel = seg.includes(vModel) || (vModel === 'accent' && seg.includes('اكسنت'));
-        const hasPos = targetPosTokens.some((pt) => seg.includes(pt));
-        return hasModel && hasPos;
+      // Check individual lines and 2-line sliding window for items wrapped across line breaks
+      const candidateWindows: string[] = [];
+      for (const seg of allSegments) {
+        const lines = seg.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+        for (let i = 0; i < lines.length; i++) {
+          const l1 = lines[i];
+          if (!l1) continue;
+          candidateWindows.push(l1);
+          const l2 = lines[i + 1];
+          if (l2) {
+            candidateWindows.push(`${l1} ${l2}`);
+          }
+        }
+      }
+
+      const hasCoOccurrence = candidateWindows.some((line) => {
+        const matchesModel = vModel
+          ? line.includes(vModel) || (vModel === 'accent' && line.includes('اكسنت')) || (vModel === 'yaris' && line.includes('يارس')) || (vModel === 'taurus' && line.includes('تورس'))
+          : false;
+        const matchesBrand = vBrand
+          ? line.includes(vBrand) ||
+            (vBrand === 'toyota' && (line.includes('تويوتا') || line.includes('toyota') || line.includes('يارس') || line.includes('ايكو') || line.includes('كامري') || line.includes('كورولا'))) ||
+            (vBrand === 'hyundai' && (line.includes('هيونداي') || line.includes('هونداي') || line.includes('hyundai') || line.includes('اكسنت') || line.includes('النترا') || line.includes('سوناتا'))) ||
+            (vBrand === 'ford' && (line.includes('فورد') || line.includes('ford') || line.includes('تورس'))) ||
+            (vBrand === 'nissan' && (line.includes('نيسان') || line.includes('nissan') || line.includes('صني') || line.includes('باترول')))
+          : false;
+
+        const matchesVehicle = matchesModel || matchesBrand;
+        const hasPos = targetPosTokens.some((pt) => line.includes(pt));
+
+        // If part concept is also specified (e.g. bumper), verify part co-occurrence on the same line/window
+        if (intent.partEntity === 'bumper') {
+          const hasBumper = line.includes('صدام') || line.includes('صدم') || line.includes('bumper');
+          return matchesVehicle && hasPos && hasBumper;
+        }
+
+        return matchesVehicle && hasPos;
       });
 
       if (!hasCoOccurrence) {
-        // VETO: Model does not co-occur with requested position in any chunk
+        // VETO: Vehicle entity does not co-occur with requested position in any chunk
         continue;
       }
     }
