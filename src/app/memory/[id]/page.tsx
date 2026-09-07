@@ -3,6 +3,7 @@ import { notFound } from 'next/navigation';
 import { getMemory } from '@/lib/memories/queries';
 import { recordRetrievalEvent } from '@/lib/memories/personalRetrieval';
 import { DeleteMemoryButton } from '@/components/memories/DeleteMemoryButton';
+import { EditMemoryDialog } from '@/components/memories/EditMemoryDialog';
 import { formatFileSize, formatMemoryDate } from '@/lib/format';
 import { ThemeToggle } from '@/components/ui/ThemeToggle';
 
@@ -111,7 +112,8 @@ export default async function MemoryPage({ params, searchParams }: MemoryPagePro
           </p>
         ) : null}
 
-        <div className="border-t border-border pt-6">
+        <div className="flex items-center justify-between border-t border-border pt-6">
+          <EditMemoryDialog memory={memory} />
           <DeleteMemoryButton memoryId={memory.id} />
         </div>
       </article>

@@ -1018,6 +1018,24 @@ export function rankCandidatesByCompoundIntent(
       }
     }
 
+    // Human Caption / User Note Boost:
+    // For memories with a human-authored note (not an AI machine description starting with
+    // "A ...", "An ...", "Logo /", "```json", etc.), award a dedicated boost (+120 points)
+    // matching title priority so human annotations are never suppressed.
+    const rawFirstBlock = (mem.text_content || '').split('\n\n')[0]?.trim() || '';
+    const isMachineDescription = /^(A |An |The |Logo \/|```json|1\. \*\*Document)/i.test(rawFirstBlock);
+    const hasHumanNote = Boolean(rawFirstBlock && !isMachineDescription);
+
+    if (hasHumanNote) {
+      const normNote = normalizeArabicForSearch(rawFirstBlock).toLowerCase();
+      for (const t of terms) {
+        const normTerm = normalizeArabicForSearch(t).toLowerCase();
+        if (normNote.includes(normTerm)) {
+          score += 120;
+        }
+      }
+    }
+
     // Full query coverage bonus
     if (matchedTermsCount >= terms.length && terms.length > 0) {
       score += 60;
@@ -1387,10 +1405,27 @@ export async function searchMemories(
   const intent = parseQueryIntent(trimmed);
   const fast = await searchMemoriesFast(trimmed, offset, limit);
 
-  // Fast Path: If fast results found matches via structured intent (numbers/months/concepts/URL)
-  // or dense lexical hits (>= 2), return immediately ($0 AI, < 30ms latency)
-  if (fast.memories.length >= 1 && (intent.hasStructuredIntent || fast.memories.length >= 2)) {
-    return { memories: fast.memories, hasMore: fast.hasMore };
+  // Fast Path: Return immediately if:
+  // 1. Structured intent matched (numbers, months, concepts, URL), OR
+  // 2. Dense lexical hits (>= 2), OR
+  // 3. Single hit that directly contains query terms in title, user note, or text ($0 AI, < 30ms latency)
+  if (fast.memories.length >= 1) {
+    if (intent.hasStructuredIntent || fast.memories.length >= 2) {
+      return { memories: fast.memories, hasMore: fast.hasMore };
+    }
+    const termsToCheck = intent.coreTerms.length > 0 ? intent.coreTerms : tokenize(trimmed);
+    const topMem = fast.memories[0];
+    if (topMem) {
+      const topText = normalizeArabicForSearch(
+        `${topMem.title || ''} ${topMem.text_content || ''} ${topMem.url || ''}`
+      ).toLowerCase();
+      const hasDirectLexicalHit = termsToCheck.some((t) =>
+        topText.includes(normalizeArabicForSearch(t).toLowerCase())
+      );
+      if (hasDirectLexicalHit) {
+        return { memories: fast.memories, hasMore: fast.hasMore };
+      }
+    }
   }
 
   // Negative constraint fast-exit:

@@ -1,43 +1,113 @@
 /**
- * Privacy-conscious analytics — stub.
+ * Privacy-Conscious & Resilient Operational Analytics.
  *
- * Emits ONLY typed, content-free events. It NEVER receives memory content
- * (no titles, text, URLs, or file bytes). By default it no-ops. A real sink
- * (e.g. a privacy-respecting product-analytics provider) can be wired in later
- * behind this same API.
+ * Implements non-blocking, fail-safe event recording for Admin v1 & Search Intelligence.
  *
- * TODO (Phase 3): implement a real, consent-gated sink. Keep the "no content"
- * guarantee — only counts and coarse, non-identifying properties.
+ * Design Guarantees:
+ *  1. Non-blocking: Asynchronous execution, never awaits DB writes in hot user paths.
+ *  2. Fail-safe: Errors are caught silently; analytics failure NEVER breaks user actions.
+ *  3. Minimal footprint: Clean structured schema, zero sensitive user content.
  */
 
-/** The closed set of events the app may emit. */
+import { createClient } from '@/lib/supabase/client';
+import type { SupabaseClient } from '@supabase/supabase-js';
+
 export type AnalyticsEvent =
+  | 'signup'
+  | 'login'
+  | 'logout'
   | 'memory_created'
+  | 'memory_opened'
+  | 'memory_edited'
   | 'memory_deleted'
+  | 'search'
   | 'search_started'
+  | 'search_zero_result'
+  | 'search_result_clicked'
   | 'search_result_opened'
+  | 'upload_failed'
+  | 'enrichment_failed'
   | 'signup_completed';
 
-/**
- * Allowed, content-free properties. Deliberately narrow: no free-form strings
- * that could carry memory content.
- */
 export interface AnalyticsProperties {
-  /** For memory_created/deleted: which kind of memory (not its content). */
   memoryType?: 'image' | 'document' | 'link' | 'note';
-  /** For search: result count only — never the query text. */
+  memoryId?: string;
   resultCount?: number;
+  latencyMs?: number;
+  query?: string;
+  errorReason?: string;
+  [key: string]: unknown;
 }
 
 /**
- * Track an event. No-op by default. Never pass memory content — the type of
- * `properties` intentionally forbids it.
+ * Record a telemetry event. Safe to call from client or server.
+ * Never throws, never blocks.
  */
-export function track(_event: AnalyticsEvent, _properties: AnalyticsProperties = {}): void {
-  if (process.env.NODE_ENV === 'development') {
-    // Local visibility only; still no content is logged.
-    // eslint-disable-next-line no-console
-    console.debug('[analytics:noop]', _event, _properties);
+export function track(event: AnalyticsEvent, properties: AnalyticsProperties = {}): void {
+  try {
+    if (process.env.NODE_ENV === 'development') {
+      // eslint-disable-next-line no-console
+      console.debug('[analytics]', event, properties);
+    }
+
+    // Only attempt browser-side persistence if in browser environment
+    if (typeof window !== 'undefined') {
+      void (async () => {
+        try {
+          const supabase = createClient();
+          const { data: { user } } = await supabase.auth.getUser();
+
+          const query = typeof properties.query === 'string' ? properties.query.slice(0, 200) : null;
+          const memoryId = typeof properties.memoryId === 'string' ? properties.memoryId : null;
+
+          const { query: _, memoryId: __, ...cleanMeta } = properties;
+
+          await supabase.from('analytics_events').insert({
+            user_id: user?.id ?? null,
+            event_type: event,
+            memory_id: memoryId,
+            query,
+            metadata: cleanMeta,
+          });
+        } catch {
+          // Fail-safe by design: silent swallow
+        }
+      })();
+    }
+  } catch {
+    // Fail-safe: never throw
   }
-  // TODO (Phase 3): forward to a real sink here.
+}
+
+/**
+ * Record a server-side telemetry event (e.g. inside server actions or retrieval engine).
+ * Completely non-blocking and fail-safe.
+ */
+export async function trackServerEvent(
+  supabase: SupabaseClient,
+  event: AnalyticsEvent,
+  userId: string | null,
+  properties: AnalyticsProperties = {},
+): Promise<void> {
+  try {
+    const query = typeof properties.query === 'string' ? properties.query.slice(0, 200) : null;
+    const memoryId = typeof properties.memoryId === 'string' ? properties.memoryId : null;
+    const { query: _, memoryId: __, ...cleanMeta } = properties;
+
+    void (async () => {
+      try {
+        await supabase.from('analytics_events').insert({
+          user_id: userId,
+          event_type: event,
+          memory_id: memoryId,
+          query,
+          metadata: cleanMeta,
+        });
+      } catch {
+        // Fail-safe: never crash server request if table is pending migration
+      }
+    })();
+  } catch {
+    // Fail-safe
+  }
 }

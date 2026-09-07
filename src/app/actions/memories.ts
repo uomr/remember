@@ -5,7 +5,8 @@ import { revalidatePath } from 'next/cache';
 import { createClient } from '@/lib/supabase/server';
 import { STORAGE_BUCKET, buildStoragePath } from '@/lib/config';
 import { normalizeUrl, safeFileName, verifyUpload } from '@/lib/memories/validation';
-import { listMemories, searchMemories, type MemoryPage } from '@/lib/memories/queries';
+import { listMemories, searchMemories, getMemory, type MemoryPage } from '@/lib/memories/queries';
+import { getAIService } from '@/lib/ai';
 import { track } from '@/lib/analytics';
 import { enrichDocumentMemory, enrichImageMemory } from '@/app/actions/enrich';
 import type { MemoryType } from '@/types/database';
@@ -260,5 +261,112 @@ export async function checkMemoryStatuses(memoryIds: string[]): Promise<MemorySt
 
   if (error || !data) return [];
   return data as MemoryStatusUpdate[];
+}
+
+/**
+ * Update an existing memory (title, user note/description).
+ * Preserves machine visual/OCR descriptions while updating human caption.
+ * Updates lexical index immediately and marks embedding for background refresh.
+ */
+export async function updateMemory(formData: FormData): Promise<ActionResult> {
+  const memoryId = String(formData.get('id') ?? '').trim();
+  if (!memoryId) {
+    return { ok: false, error: 'Memory ID is required.' };
+  }
+
+  const supabase = createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+
+  if (!user) {
+    return { ok: false, error: 'Your session has expired. Please sign in again.' };
+  }
+
+  try {
+    const memory = await getMemory(memoryId);
+    if (!memory) {
+      return { ok: false, error: 'Memory not found or access denied.' };
+    }
+
+    const titleInput = formData.get('title');
+    const noteInput = formData.get('text');
+
+    const newTitle = titleInput != null ? String(titleInput).trim() : (memory.title ?? '');
+    const newNote = noteInput != null ? String(noteInput).trim() : '';
+
+    let updatedTextContent: string | null = null;
+
+    if (memory.type === 'note') {
+      if (!newNote) return { ok: false, error: 'Note cannot be empty.' };
+      updatedTextContent = newNote;
+    } else if (memory.type === 'link') {
+      updatedTextContent = newNote || null;
+    } else {
+      // For image or document: preserve machine description while updating human note
+      const existingText = memory.text_content ?? '';
+      const existingParts = existingText.split('\n\n').map((p) => p.trim()).filter(Boolean);
+      const machineParts = existingParts.slice(1);
+
+      if (newNote) {
+        if (machineParts.length > 0) {
+          updatedTextContent = [newNote, ...machineParts].join('\n\n');
+        } else {
+          updatedTextContent = newNote;
+        }
+      } else {
+        updatedTextContent = machineParts.length > 0 ? machineParts.join('\n\n') : null;
+      }
+    }
+
+    const finalTitle = newTitle || (memory.type === 'note' && updatedTextContent ? titleFromText(updatedTextContent) : memory.title);
+
+    const updatePayload: Record<string, unknown> = {
+      title: finalTitle,
+      text_content: updatedTextContent,
+      updated_at: new Date().toISOString(),
+    };
+
+    // Re-generate semantic embedding if AI service is available
+    const ai = getAIService();
+    if (ai.enabled) {
+      const textToEmbed = [finalTitle, updatedTextContent, memory.url]
+        .filter(Boolean)
+        .join('\n\n')
+        .trim();
+      if (textToEmbed) {
+        try {
+          const vector = await ai.embed({ text: textToEmbed });
+          if (vector && vector.length > 0) {
+            updatePayload.embedding = JSON.stringify(vector);
+          }
+        } catch {
+          // If embed fails, mark stale (null) so lexical search still functions cleanly
+          updatePayload.embedding = null;
+        }
+      }
+    } else {
+      updatePayload.embedding = null;
+    }
+
+    const { error: updateError } = await supabase
+      .from('memories')
+      .update(updatePayload)
+      .eq('id', memoryId);
+
+    if (updateError) {
+      console.error('[updateMemory:error]', updateError.message);
+      return { ok: false, error: GENERIC_SAVE_ERROR };
+    }
+
+    track('memory_edited', { memoryType: memory.type });
+
+    revalidatePath('/');
+    revalidatePath(`/memory/${memoryId}`);
+    return { ok: true, memoryId };
+  } catch (error) {
+    console.error('[updateMemory:fatal]', error instanceof Error ? error.message : String(error));
+    return { ok: false, error: GENERIC_SAVE_ERROR };
+  }
 }
 
