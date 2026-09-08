@@ -1,7 +1,6 @@
 -- ============================================================================
 -- MIGRATION: 0005_analytics_and_admin.sql
 -- Lightweight, non-blocking telemetry and Admin v1 foundation.
--- DOES NOT apply or depend on migration 0004.
 -- ============================================================================
 
 -- Table for system and user activity telemetry
@@ -30,12 +29,19 @@ create index if not exists idx_analytics_events_user_created
 -- RLS Enforcement
 alter table public.analytics_events enable row level security;
 
--- Inserts: Any authenticated user (or service role) can record an event
+-- Inserts: Authenticated users can record only their own events
+drop policy if exists "analytics_events_insert_own" on public.analytics_events;
 create policy "analytics_events_insert_own"
   on public.analytics_events for insert
-  with check (auth.uid() = user_id or auth.uid() is null);
+  to authenticated
+  with check (auth.uid() = user_id);
 
--- Reads: Strictly restricted to service role or admin. Normal users cannot read analytics.
+-- Reads: Strictly restricted to service role. Normal users have NO select policy.
+drop policy if exists "analytics_events_select_service_role" on public.analytics_events;
 create policy "analytics_events_select_service_role"
   on public.analytics_events for select
   using (auth.jwt()->>'role' = 'service_role');
+
+-- Grants: explicit minimal grants (no broad/unsafe anon access)
+grant select, insert, update, delete on table public.analytics_events to service_role;
+grant insert on table public.analytics_events to authenticated;

@@ -36,11 +36,12 @@ export interface AnalyticsProperties {
   latencyMs?: number;
   query?: string;
   errorReason?: string;
+  fromQuery?: string;
   [key: string]: unknown;
 }
 
 /**
- * Record a telemetry event. Safe to call from client or server.
+ * Record a telemetry event in browser environment. Safe to call from client.
  * Never throws, never blocks.
  */
 export function track(event: AnalyticsEvent, properties: AnalyticsProperties = {}): void {
@@ -50,20 +51,22 @@ export function track(event: AnalyticsEvent, properties: AnalyticsProperties = {
       console.debug('[analytics]', event, properties);
     }
 
-    // Only attempt browser-side persistence if in browser environment
     if (typeof window !== 'undefined') {
       void (async () => {
         try {
           const supabase = createClient();
-          const { data: { user } } = await supabase.auth.getUser();
+          const {
+            data: { user },
+          } = await supabase.auth.getUser();
+
+          if (!user) return;
 
           const query = typeof properties.query === 'string' ? properties.query.slice(0, 200) : null;
           const memoryId = typeof properties.memoryId === 'string' ? properties.memoryId : null;
-
           const { query: _, memoryId: __, ...cleanMeta } = properties;
 
           await supabase.from('analytics_events').insert({
-            user_id: user?.id ?? null,
+            user_id: user.id,
             event_type: event,
             memory_id: memoryId,
             query,
@@ -80,7 +83,8 @@ export function track(event: AnalyticsEvent, properties: AnalyticsProperties = {
 }
 
 /**
- * Record a server-side telemetry event (e.g. inside server actions or retrieval engine).
+ * Record a server-side telemetry event (inside server actions or server components).
+ * Directly writes to analytics_events under caller context.
  * Completely non-blocking and fail-safe.
  */
 export async function trackServerEvent(
@@ -94,20 +98,14 @@ export async function trackServerEvent(
     const memoryId = typeof properties.memoryId === 'string' ? properties.memoryId : null;
     const { query: _, memoryId: __, ...cleanMeta } = properties;
 
-    void (async () => {
-      try {
-        await supabase.from('analytics_events').insert({
-          user_id: userId,
-          event_type: event,
-          memory_id: memoryId,
-          query,
-          metadata: cleanMeta,
-        });
-      } catch {
-        // Fail-safe: never crash server request if table is pending migration
-      }
-    })();
+    await supabase.from('analytics_events').insert({
+      user_id: userId,
+      event_type: event,
+      memory_id: memoryId,
+      query,
+      metadata: cleanMeta,
+    });
   } catch {
-    // Fail-safe
+    // Fail-safe: never crash server request if table is pending migration or transient failure
   }
 }

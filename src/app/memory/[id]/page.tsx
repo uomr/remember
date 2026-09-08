@@ -1,7 +1,9 @@
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
+import { createClient } from '@/lib/supabase/server';
 import { getMemory } from '@/lib/memories/queries';
 import { recordRetrievalEvent } from '@/lib/memories/personalRetrieval';
+import { trackServerEvent } from '@/lib/analytics';
 import { DeleteMemoryButton } from '@/components/memories/DeleteMemoryButton';
 import { EditMemoryDialog } from '@/components/memories/EditMemoryDialog';
 import { formatFileSize, formatMemoryDate } from '@/lib/format';
@@ -26,6 +28,19 @@ interface MemoryPageProps {
 export default async function MemoryPage({ params, searchParams }: MemoryPageProps) {
   const memory = await getMemory(params.id);
   if (!memory) notFound();
+
+  const supabase = createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+
+  if (user) {
+    await trackServerEvent(supabase, 'memory_opened', user.id, {
+      memoryId: memory.id,
+      memoryType: memory.type,
+      fromQuery: searchParams?.fromQuery,
+    });
+  }
 
   // If arriving from an active search query, record confirmed recovery
   if (searchParams?.fromQuery) {

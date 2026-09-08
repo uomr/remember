@@ -7,7 +7,7 @@ import { STORAGE_BUCKET, buildStoragePath } from '@/lib/config';
 import { normalizeUrl, safeFileName, verifyUpload } from '@/lib/memories/validation';
 import { listMemories, searchMemories, getMemory, type MemoryPage } from '@/lib/memories/queries';
 import { getAIService } from '@/lib/ai';
-import { track } from '@/lib/analytics';
+import { trackServerEvent } from '@/lib/analytics';
 import { enrichDocumentMemory, enrichImageMemory } from '@/app/actions/enrich';
 import type { MemoryType } from '@/types/database';
 
@@ -62,7 +62,10 @@ export async function createMemory(formData: FormData): Promise<ActionResult> {
         .single();
 
       if (error || !data) return { ok: false, error: GENERIC_SAVE_ERROR };
-      track('memory_created', { memoryType: 'note' });
+      await trackServerEvent(supabase, 'memory_created', user.id, {
+        memoryType: 'note',
+        memoryId: data.id,
+      });
       revalidatePath('/');
       return { ok: true, memoryId: data.id };
     }
@@ -85,7 +88,10 @@ export async function createMemory(formData: FormData): Promise<ActionResult> {
         .single();
 
       if (error || !data) return { ok: false, error: GENERIC_SAVE_ERROR };
-      track('memory_created', { memoryType: 'link' });
+      await trackServerEvent(supabase, 'memory_created', user.id, {
+        memoryType: 'link',
+        memoryId: data.id,
+      });
       revalidatePath('/');
       return { ok: true, memoryId: data.id };
     }
@@ -161,7 +167,10 @@ export async function createMemory(formData: FormData): Promise<ActionResult> {
       return { ok: false, error: GENERIC_SAVE_ERROR };
     }
 
-    track('memory_created', { memoryType: validation.memoryType });
+    await trackServerEvent(supabase, 'memory_created', user.id, {
+      memoryType: validation.memoryType,
+      memoryId,
+    });
 
     // Background enrichment (never blocks capture)
     if (validation.memoryType === 'document') {
@@ -217,7 +226,9 @@ export async function deleteMemory(memoryId: string): Promise<ActionResult> {
       }
     }
 
-    track('memory_deleted');
+    await trackServerEvent(supabase, 'memory_deleted', user.id, {
+      memoryId,
+    });
     revalidatePath('/');
     return { ok: true };
   } catch {
@@ -322,7 +333,7 @@ export async function updateMemory(formData: FormData): Promise<ActionResult> {
           updatedTextContent = machineSections || null;
         }
       } else {
-        const existingParts = existingText.split('\n\n').map((p) => p.trim()).filter(Boolean);
+        const existingParts = existingText.split('\n\n').map((p: string) => p.trim()).filter(Boolean);
         const machineParts = existingParts.slice(1);
 
         if (newNote) {
@@ -377,7 +388,10 @@ export async function updateMemory(formData: FormData): Promise<ActionResult> {
       return { ok: false, error: GENERIC_SAVE_ERROR };
     }
 
-    track('memory_edited', { memoryType: memory.type });
+    await trackServerEvent(supabase, 'memory_edited', user.id, {
+      memoryType: memory.type,
+      memoryId,
+    });
 
     revalidatePath('/');
     revalidatePath(`/memory/${memoryId}`);

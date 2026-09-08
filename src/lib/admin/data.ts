@@ -164,10 +164,10 @@ export async function fetchAdminDashboardData(): Promise<AdminDashboardData> {
   const zeroResultMap = new Map<string, { count: number; last: string }>();
 
   for (const e of eventsList) {
-    if (e.user_id && (e.event_type === 'search' || e.event_type === 'search_started')) {
+    if (e.user_id && (e.event_type === 'search' || e.event_type === 'search_started' || e.event_type === 'search_zero_result')) {
       searchCountByUser.set(e.user_id, (searchCountByUser.get(e.user_id) || 0) + 1);
     }
-    if (e.event_type === 'search' || e.event_type === 'search_started') {
+    if (e.event_type === 'search' || e.event_type === 'search_started' || e.event_type === 'search_zero_result') {
       if (e.created_at >= oneDayAgo) searchesToday++;
       if (e.query) {
         searchCounts.set(e.query, (searchCounts.get(e.query) || 0) + 1);

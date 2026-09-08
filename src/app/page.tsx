@@ -1,5 +1,6 @@
 import { createClient } from '@/lib/supabase/server';
 import { listMemories, searchMemories } from '@/lib/memories/queries';
+import { trackServerEvent } from '@/lib/analytics';
 import { CaptureButton } from '@/components/capture/CaptureButton';
 import { MemoryLibrary } from '@/components/memories/MemoryLibrary';
 import { AppHeader } from '@/components/layout/AppHeader';
@@ -28,7 +29,18 @@ export default async function HomePage({
     data: { user },
   } = await supabase.auth.getUser();
 
+  const startTime = Date.now();
   const { memories, hasMore } = query ? await searchMemories(query) : await listMemories();
+  const latencyMs = Date.now() - startTime;
+
+  if (query && user) {
+    const isZero = memories.length === 0;
+    await trackServerEvent(supabase, isZero ? 'search_zero_result' : 'search', user.id, {
+      query,
+      resultCount: memories.length,
+      latencyMs,
+    });
+  }
 
   const greetingName = user?.email ? user.email.split('@')[0] : null;
 
